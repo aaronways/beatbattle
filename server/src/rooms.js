@@ -468,6 +468,62 @@ export function rematch(io, room) {
 // Disconnect handling — give them RECONNECT_GRACE_SECONDS to come back.
 // ────────────────────────────────────────────────────────────────────────────
 
+// Explicit "Leave" button — user is choosing to exit, not a connection drop.
+// In LOBBY: clean eviction, no grace. In any other phase: same as a
+// disconnect path that immediately evicts (RESULT/PLAYBACK/VOTING) or
+// counts as a forfeit (BATTLE). The point: a deliberate leave never leaves
+// userToRoom pointing at the room they just left, which is what caused the
+// "snaps you back to the lobby" bug.
+export function leaveRoomNow(io, userId) {
+  cancelQuickBattle(userId);
+
+  // Spectator? Easy — just leave.
+  const spectateRoom = getSpectateRoomForUser(userId);
+  if (spectateRoom && !spectateRoom.players[userId]) {
+    leaveSpectate(io, userId, spectateRoom);
+    return;
+  }
+
+  const room = getRoomForUser(userId);
+  if (!room) return;
+
+  // In BATTLE, an explicit leave with an opponent present forfeits the match.
+  if (room.phase === PHASE.BATTLE) {
+    const other = Object.values(room.players).find(x => x.id !== userId);
+    if (other) {
+      room.playerOrder = [other.id, userId];
+      room.voteCounts = { A: 1, B: 0 };
+      room.players[userId].beat ||= { bpm: 140, bars: 4, tracks: [], effects: {} };
+      room.players[other.id].beat ||= { bpm: 140, bars: 4, tracks: [], effects: {} };
+      room.phase = PHASE.RESULT;
+      room.result = {
+        winner: 'A',
+        voteCounts: { A: 1, B: 0 },
+        winnerUsername: other.username,
+        forfeit: true,
+      };
+      if (room.timer) { clearInterval(room.timer); room.timer = null; }
+      store.recordMatch({
+        code: room.code,
+        ranked: room.ranked,
+        playerA: other.id,
+        playerB: userId,
+        winner: 'A',
+        forfeit: true,
+      });
+      // Now evict the leaver fully so they go back to home.
+      leaveRoomFully(io, room, userId);
+      return;
+    }
+    // No opponent in BATTLE (shouldn't happen, but defensive) — just leave.
+    leaveRoomFully(io, room, userId);
+    return;
+  }
+
+  // Any other phase (LOBBY, PLAYBACK, VOTING, RESULT): just fully evict.
+  leaveRoomFully(io, room, userId);
+}
+
 export function handleDisconnect(io, userId) {
   cancelQuickBattle(userId);
 
@@ -484,12 +540,8 @@ export function handleDisconnect(io, userId) {
   const p = room.players[userId];
   if (!p) return;
 
-  // If the game is already concluded (RESULT) or in the brief between-phases
-  // states (PLAYBACK/VOTING) and the user is explicitly leaving, just evict
-  // them — there's nothing to "come back to". This is the fix for the
-  // "Back to lobby" button: previously these phases didn't release the
-  // player, so the client could clear local state but the server still
-  // thought they were in the room → reconnect would snap them right back.
+  // Socket closed during RESULT/PLAYBACK/VOTING: game is settled or settling,
+  // just remove them. There's nothing to "come back to."
   if (
     room.phase === PHASE.RESULT ||
     room.phase === PHASE.PLAYBACK ||

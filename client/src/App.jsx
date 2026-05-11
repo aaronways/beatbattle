@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Home from './components/Home.jsx';
 import Lobby from './components/Lobby.jsx';
 import BeatEditor from './components/BeatEditor.jsx';
@@ -16,11 +16,19 @@ export default function App() {
   const [room, setRoom] = useState(null);
   const [view, setView] = useState('home'); // home | leaderboard | practice | spectate-browser
   const [practiceKit, setPracticeKit] = useState(null);
+  // Tracks the room code we just left, so that any straggler 'room' events
+  // for it from the server (in flight when we called leaveRoom) get ignored
+  // instead of snapping us back into the room. Cleared after 2s.
+  const leavingCodeRef = useRef(null);
 
   // Initial connect.
   useEffect(() => {
     connect().then(setUser);
-    const onRoom = (r) => setRoom(r);
+    const onRoom = (r) => {
+      // Ignore straggler snapshots for a room we just left.
+      if (leavingCodeRef.current && r?.code === leavingCodeRef.current) return;
+      setRoom(r);
+    };
     const onTick = (t) => setRoom(prev => prev ? { ...prev, ...t } : prev);
     // When a room a spectator was watching disappears (both players left),
     // server sends this. We clear local state and bounce them to the browser.
@@ -42,6 +50,14 @@ export default function App() {
   const enterSpectate = (_code) => { /* server pushes 'room' event with isSpectator: true */ };
 
   const leaveRoom = () => {
+    // Stamp the code we're leaving so any in-flight snapshot for it gets
+    // ignored. Cleared shortly after — by then the server is fully aware.
+    if (room?.code) {
+      leavingCodeRef.current = room.code;
+      setTimeout(() => {
+        if (leavingCodeRef.current === room.code) leavingCodeRef.current = null;
+      }, 2000);
+    }
     // The server-side leaveRoom handles BOTH player and spectator roles —
     // it picks the right cleanup based on which map the user is in.
     if (room?.isSpectator) {

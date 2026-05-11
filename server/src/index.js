@@ -149,7 +149,7 @@ io.on('connection', (socket) => {
 
   socket.on('leaveRoom', () => {
     if (!user) return;
-    rooms.handleDisconnect(io, user.id);
+    rooms.leaveRoomNow(io, user.id);
   });
 
   socket.on('disconnect', () => {

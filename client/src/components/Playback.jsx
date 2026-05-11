@@ -9,6 +9,19 @@ export default function Playback({ room }) {
   const playedRef = useRef(false);
   const beats = room.playback?.beats;
 
+  // A beat has "content" only if at least one step in any track is non-empty.
+  // Submitted beats always include the 8 track slots even when all steps are
+  // empty arrays — `tracks.length` alone can't tell us if there's audio.
+  // Without this, an opponent who submitted nothing produces a silent stage
+  // that looks like a playback bug.
+  function hasContent(beat) {
+    if (!beat?.tracks?.length) return false;
+    return beat.tracks.some(t => Array.isArray(t.steps) && t.steps.some(c => Array.isArray(c) && c.length > 0));
+  }
+
+  const aHasContent = hasContent(beats?.A);
+  const bHasContent = hasContent(beats?.B);
+
   // Play A → gap → B once per playback phase.
   useEffect(() => {
     if (room.phase !== PHASE.PLAYBACK) return;
@@ -23,12 +36,16 @@ export default function Playback({ room }) {
       await wait(1200);
       if (cancelled) return;
 
-      if (beats?.A?.tracks?.length) {
+      if (aHasContent) {
         setStage('playA');
         engine.schedule(beats.A);
         engine.play();
         await wait(durationMs(beats.A));
         engine.stop();
+      } else {
+        // Show the silent slot for a beat so the user sees what's happening.
+        setStage('playA');
+        await wait(2000);
       }
       if (cancelled) return;
 
@@ -36,12 +53,15 @@ export default function Playback({ room }) {
       await wait(900);
       if (cancelled) return;
 
-      if (beats?.B?.tracks?.length) {
+      if (bHasContent) {
         setStage('playB');
         engine.schedule(beats.B);
         engine.play();
         await wait(durationMs(beats.B));
         engine.stop();
+      } else {
+        setStage('playB');
+        await wait(2000);
       }
       setStage('done');
     })();
@@ -52,7 +72,10 @@ export default function Playback({ room }) {
 
   const replay = async (which) => {
     const beat = beats?.[which];
-    if (!beat?.tracks?.length) return;
+    if (!hasContent(beat)) {
+      alert(`Beat ${which} is empty — nothing was submitted.`);
+      return;
+    }
     await engine.start();
     engine.schedule(beat);
     engine.play();
@@ -89,6 +112,7 @@ export default function Playback({ room }) {
           onReplay={() => replay('A')}
           isYours={yourBeatIs === 'A' && isVoting}
           disabled={!isVoting}
+          isEmpty={!aHasContent}
         />
         <div className="vs-big">VS</div>
         <BeatTile
@@ -100,6 +124,7 @@ export default function Playback({ room }) {
           onReplay={() => replay('B')}
           isYours={yourBeatIs === 'B' && isVoting}
           disabled={!isVoting}
+          isEmpty={!bHasContent}
         />
       </div>
 
@@ -116,20 +141,22 @@ export default function Playback({ room }) {
   );
 }
 
-function BeatTile({ label, highlight, played, canVote, isYours, disabled, onVote, onReplay }) {
+function BeatTile({ label, highlight, played, canVote, isYours, disabled, isEmpty, onVote, onReplay }) {
   return (
     <div className={[
       'beat-tile', highlight ? 'now-playing' : '',
       played ? 'played' : '', isYours ? 'yours' : '',
+      isEmpty ? 'empty' : '',
     ].join(' ')}>
       <div className="beat-letter">{label}</div>
       <div className="beat-meta">
-        {highlight && <span className="now">▶ Now playing</span>}
-        {!highlight && played && <span className="muted">Heard</span>}
-        {!highlight && !played && <span className="muted">Up next</span>}
+        {isEmpty && <span className="empty-tag">EMPTY · no notes submitted</span>}
+        {!isEmpty && highlight && <span className="now">▶ Now playing</span>}
+        {!isEmpty && !highlight && played && <span className="muted">Heard</span>}
+        {!isEmpty && !highlight && !played && <span className="muted">Up next</span>}
       </div>
       <div className="beat-actions">
-        <button className="btn small" disabled={disabled} onClick={onReplay}>Replay</button>
+        <button className="btn small" disabled={disabled || isEmpty} onClick={onReplay}>Replay</button>
         <button
           className="btn primary"
           disabled={disabled || !canVote}

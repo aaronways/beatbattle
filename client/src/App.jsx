@@ -5,6 +5,8 @@ import BeatEditor from './components/BeatEditor.jsx';
 import Playback from './components/Playback.jsx';
 import Winner from './components/Winner.jsx';
 import Leaderboard from './components/Leaderboard.jsx';
+import MatchBrowser from './components/MatchBrowser.jsx';
+import SpectatorView from './components/SpectatorView.jsx';
 import { connect, socket } from './socket.js';
 import { generateKitClient } from './audio/kitGen.js';
 import { PHASE, KIT_COMPOSITION } from '../../shared/gameRules.js';
@@ -12,7 +14,7 @@ import { PHASE, KIT_COMPOSITION } from '../../shared/gameRules.js';
 export default function App() {
   const [user, setUser] = useState(null);
   const [room, setRoom] = useState(null);
-  const [view, setView] = useState('home'); // home | leaderboard | practice
+  const [view, setView] = useState('home'); // home | leaderboard | practice | spectate-browser
   const [practiceKit, setPracticeKit] = useState(null);
 
   // Initial connect.
@@ -20,18 +22,33 @@ export default function App() {
     connect().then(setUser);
     const onRoom = (r) => setRoom(r);
     const onTick = (t) => setRoom(prev => prev ? { ...prev, ...t } : prev);
+    // When a room a spectator was watching disappears (both players left),
+    // server sends this. We clear local state and bounce them to the browser.
+    const onEnded = () => {
+      setRoom(null);
+      setView('spectate-browser');
+    };
     socket.on('room', onRoom);
     socket.on('tick', onTick);
+    socket.on('spectateEnded', onEnded);
     return () => {
       socket.off('room', onRoom);
       socket.off('tick', onTick);
+      socket.off('spectateEnded', onEnded);
     };
   }, []);
 
   const enterRoom = (_code) => { /* server pushes 'room' event next */ };
+  const enterSpectate = (_code) => { /* server pushes 'room' event with isSpectator: true */ };
 
   const leaveRoom = () => {
-    socket.emit('leaveRoom');
+    // The server-side leaveRoom handles BOTH player and spectator roles —
+    // it picks the right cleanup based on which map the user is in.
+    if (room?.isSpectator) {
+      socket.emit('leaveSpectate');
+    } else {
+      socket.emit('leaveRoom');
+    }
     setRoom(null);
     setView('home');
   };
@@ -45,6 +62,14 @@ export default function App() {
   if (view === 'leaderboard') {
     return <Leaderboard onBack={() => setView('home')} />;
   }
+  if (view === 'spectate-browser' && !room) {
+    return (
+      <MatchBrowser
+        onBack={() => setView('home')}
+        onEnterSpectate={enterSpectate}
+      />
+    );
+  }
   if (view === 'practice') {
     return (
       <BeatEditor
@@ -56,8 +81,23 @@ export default function App() {
     );
   }
 
-  // If we're in a room, route by phase.
+  // If we're in a room (player or spectator), route by phase.
   if (room) {
+    // Spectator routing — different from player routing because spectators
+    // never see the editor.
+    if (room.isSpectator) {
+      if (room.phase === PHASE.LOBBY || room.phase === PHASE.BATTLE) {
+        return <SpectatorView room={room} onLeave={leaveRoom} />;
+      }
+      if (room.phase === PHASE.PLAYBACK || room.phase === PHASE.VOTING) {
+        return <Playback room={room} />;
+      }
+      if (room.phase === PHASE.RESULT) {
+        return <Winner room={room} onLeave={leaveRoom} />;
+      }
+    }
+
+    // Player routing.
     if (room.phase === PHASE.LOBBY) {
       return <Lobby room={room} onLeave={leaveRoom} />;
     }
@@ -86,6 +126,7 @@ export default function App() {
       onEnterRoom={enterRoom}
       onPractice={startPractice}
       onLeaderboard={() => setView('leaderboard')}
+      onSpectate={() => setView('spectate-browser')}
     />
   );
 }

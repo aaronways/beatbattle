@@ -21,7 +21,8 @@ import {
 const BATTLE_SECONDS = parseInt(process.env.BATTLE_SECONDS || DEFAULT_BATTLE_SECONDS, 10);
 
 const rooms = new Map();             // code → room
-const userToRoom = new Map();        // userId → room code
+const userToRoom = new Map();        // userId → room code (PLAYER)
+const userToSpectateRoom = new Map();// userId → room code (SPECTATOR)
 // Queue entries hold the socketId at the moment of queueing, so when a
 // match fires we can immediately join BOTH players' sockets to the new
 // room channel — not just the player who clicked Quick Battle second.
@@ -31,8 +32,50 @@ const userToRoom = new Map();        // userId → room code
 let quickBattleQueue = [];           // [{ userId, socketId, joinedAt }]
 
 // ────────────────────────────────────────────────────────────────────────────
-// Room creation / lookup
+// Leaving rooms cleanly
 // ────────────────────────────────────────────────────────────────────────────
+
+// Fully evict a user from a room: stop all bookkeeping, leave the Socket.io
+// channel, and delete the room if it's now empty. This is the function that
+// handles every "I'm out, for real" case — leaving from RESULT, leaving from
+// LOBBY, hopping rooms via joinRoom, etc.
+//
+// This is separate from `handleDisconnect`, which deals with the
+// "they got disconnected but might come back" case and keeps the player slot
+// alive for RECONNECT_GRACE_SECONDS.
+function leaveRoomFully(io, room, userId) {
+  if (!room) return;
+  const player = room.players[userId];
+  if (player && io && player.socketId) {
+    // Leave the Socket.io broadcast channel so they don't receive any more
+    // 'room'/'tick' events for this room after they've left.
+    io.sockets.sockets.get(player.socketId)?.leave(room.code);
+  }
+  delete room.players[userId];
+  // Only delete the userToRoom mapping if it still points to THIS room — the
+  // user might have already joined a different one (room-hop case).
+  if (userToRoom.get(userId) === room.code) {
+    userToRoom.delete(userId);
+  }
+  // If there's a pending battle timer and nobody is left, kill it.
+  if (Object.keys(room.players).length === 0) {
+    if (room.timer) { clearInterval(room.timer); room.timer = null; }
+    // Boot any spectators so they don't get stranded on a deleted room.
+    for (const s of room.spectators.values()) {
+      if (io && s.socketId) {
+        io.sockets.sockets.get(s.socketId)?.leave(room.code);
+        io.sockets.sockets.get(s.socketId)?.emit('spectateEnded', { code: room.code });
+      }
+      userToSpectateRoom.delete(s.id);
+    }
+    rooms.delete(room.code);
+    return;
+  }
+  // Otherwise let the remaining player know someone left.
+  broadcast(io, room);
+}
+
+
 
 function generateCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1 — easier to read aloud
@@ -57,7 +100,7 @@ function newRoom({ ranked = false, isPrivate = true } = {}) {
     seed: Math.floor(Math.random() * 0x7fffffff),
     kit: null,           // computed when battle starts
     players: {},         // userId → { id, username, ready, status, beat, voted, socketId, disconnectedAt }
-    spectators: new Set(),
+    spectators: new Map(), // userId → { id, username, socketId, voted }
     battleEndsAt: null,
     votingEndsAt: null,
     timer: null,
@@ -94,21 +137,31 @@ function snapshot(room, viewerId = null) {
   // During voting we keep beat ownership hidden by design — both beats are
   // anonymized as A and B until the result phase.
   const reveal = room.phase === PHASE.RESULT;
+  const isSpectator = !room.players[viewerId] && room.spectators?.has(viewerId);
   return {
     code: room.code,
     phase: room.phase,
     ranked: room.ranked,
+    isPrivate: room.isPrivate,
     seed: room.seed,
-    kit: room.kit,
+    // Kit is only relevant to players inside the editor. Spectators get it
+    // too (for display purposes during PLAYBACK so they know what palette
+    // the players were working with) but only after BATTLE ends.
+    kit: (isSpectator && room.phase === PHASE.BATTLE) ? null : room.kit,
     players,
     playerCount: players.length,
+    spectatorCount: room.spectators ? room.spectators.size : 0,
+    isSpectator,
     battleSecondsLeft: room.battleEndsAt
       ? Math.max(0, Math.ceil((room.battleEndsAt - Date.now()) / 1000))
       : null,
     votingSecondsLeft: room.votingEndsAt
       ? Math.max(0, Math.ceil((room.votingEndsAt - Date.now()) / 1000))
       : null,
-    voteCounts: room.phase === PHASE.RESULT ? room.voteCounts : null,
+    // Expose the live vote tally during VOTING as well as the final RESULT,
+    // so spectators see the count climb as votes come in.
+    voteCounts: (room.phase === PHASE.VOTING || room.phase === PHASE.RESULT)
+      ? { ...room.voteCounts } : null,
     playback: room.phase === PHASE.PLAYBACK || room.phase === PHASE.VOTING
       ? {
           beats: {
@@ -179,6 +232,16 @@ export function cancelQuickBattle(userId) {
 }
 
 function joinRoom(io, room, user, socketId = null) {
+  // If this user is already in a DIFFERENT room (room-hop / left lobby then
+  // created a new one before the 30s disconnect grace expired), evict them
+  // from the old one cleanly first. Without this, the old room still has
+  // them as 'disconnected' and the user is logically in two rooms at once.
+  const priorCode = userToRoom.get(user.id);
+  if (priorCode && priorCode !== room.code) {
+    const priorRoom = rooms.get(priorCode);
+    if (priorRoom) leaveRoomFully(io, priorRoom, user.id);
+  }
+
   // Reconnect path: player already in this room.
   if (room.players[user.id]) {
     const p = room.players[user.id];
@@ -312,22 +375,26 @@ export function castVote(io, room, userId, choice) {
   if (room.phase !== PHASE.VOTING) return { error: 'Voting closed' };
   if (choice !== 'A' && choice !== 'B') return { error: 'Bad choice' };
   const p = room.players[userId];
+  const s = room.spectators.get(userId);
+  if (!p && !s) return { error: 'You are not in this match' };
+
   // Players cannot vote for themselves — A is playerOrder[0], B is [1].
-  const youAre = userId === room.playerOrder[0] ? 'A' : userId === room.playerOrder[1] ? 'B' : null;
+  const youAre = p
+    ? (userId === room.playerOrder[0] ? 'A' : userId === room.playerOrder[1] ? 'B' : null)
+    : null;
   if (youAre && youAre === choice) return { error: 'You cannot vote for yourself' };
-  // One vote, no changing once cast (keeps it simple, no edit window).
+
+  // One vote per user (player OR spectator), no changes.
   if (p && p.voted) return { error: 'Already voted' };
+  if (s && s.voted) return { error: 'Already voted' };
   if (p) p.voted = choice;
-  // Spectators could vote here too (room.spectators) — left as a hook.
+  if (s) s.voted = choice;
   room.voteCounts[choice]++;
-  // Both votes in? Finalize early.
-  const playerVotes = Object.values(room.players).filter(x => x.voted).length;
-  if (playerVotes >= 2) {
-    if (room.timer) { clearInterval(room.timer); room.timer = null; }
-    finalizeVotes(io, room);
-  } else {
-    broadcast(io, room);
-  }
+
+  // Don't auto-finalize on player votes alone anymore — spectators get to
+  // weigh in until the timer runs out. Just broadcast the updated tally so
+  // the count climbs live on everyone's screen.
+  broadcast(io, room);
   return { ok: true };
 }
 
@@ -403,10 +470,37 @@ export function rematch(io, room) {
 
 export function handleDisconnect(io, userId) {
   cancelQuickBattle(userId);
+
+  // If they were a spectator (and not a player), just remove them cleanly —
+  // no reconnect grace, nothing to forfeit.
+  const spectateRoom = getSpectateRoomForUser(userId);
+  if (spectateRoom && !spectateRoom.players[userId]) {
+    leaveSpectate(io, userId, spectateRoom);
+    return;
+  }
+
   const room = getRoomForUser(userId);
   if (!room) return;
   const p = room.players[userId];
   if (!p) return;
+
+  // If the game is already concluded (RESULT) or in the brief between-phases
+  // states (PLAYBACK/VOTING) and the user is explicitly leaving, just evict
+  // them — there's nothing to "come back to". This is the fix for the
+  // "Back to lobby" button: previously these phases didn't release the
+  // player, so the client could clear local state but the server still
+  // thought they were in the room → reconnect would snap them right back.
+  if (
+    room.phase === PHASE.RESULT ||
+    room.phase === PHASE.PLAYBACK ||
+    room.phase === PHASE.VOTING
+  ) {
+    leaveRoomFully(io, room, userId);
+    return;
+  }
+
+  // Otherwise (LOBBY or BATTLE) — keep the slot alive and give them the
+  // grace window to reconnect. If they don't, forfeit at the end.
   p.status = 'disconnected';
   p.disconnectedAt = Date.now();
   broadcast(io, room);
@@ -442,12 +536,12 @@ export function handleDisconnect(io, userId) {
           winner: 'A',
           forfeit: true,
         });
+        broadcast(io, stillRoom);
       } else {
-        // Lobby phase — just remove them.
-        delete stillRoom.players[userId];
-        userToRoom.delete(userId);
+        // Lobby phase with nobody else, or the leaver was already alone —
+        // fully evict so the room can be cleaned up.
+        leaveRoomFully(io, stillRoom, userId);
       }
-      broadcast(io, stillRoom);
     }
   }, RECONNECT_GRACE_SECONDS * 1000 + 100);
 }
@@ -464,6 +558,115 @@ function broadcast(io, room) {
     const sock = io.sockets.sockets.get(p.socketId);
     if (sock) sock.emit('room', snapshot(room, p.id));
   }
+  // Also push the snapshot to every spectator. Their snapshot will have
+  // isSpectator=true and the kit hidden during BATTLE phase.
+  for (const s of room.spectators.values()) {
+    if (!s.socketId) continue;
+    const sock = io.sockets.sockets.get(s.socketId);
+    if (sock) sock.emit('room', snapshot(room, s.id));
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Spectator API
+// ────────────────────────────────────────────────────────────────────────────
+
+// Return a public list of active matches that anyone is allowed to spectate.
+// Excludes:
+//   - Private rooms (invite-only by design)
+//   - Rooms in LOBBY with fewer than 2 players (nothing to watch yet)
+//   - Rooms in RESULT phase (the match is over)
+// Returns lightweight info — full state is only sent when a viewer actually
+// joins as a spectator. Keeps this endpoint cheap and cacheable.
+export function listPublicMatches() {
+  const out = [];
+  for (const room of rooms.values()) {
+    if (room.isPrivate) continue;
+    if (room.phase === PHASE.RESULT) continue;
+    const playerList = Object.values(room.players);
+    if (playerList.length < 2 && room.phase === PHASE.LOBBY) continue;
+    out.push({
+      code: room.code,
+      phase: room.phase,
+      ranked: room.ranked,
+      players: playerList.map(p => ({ username: p.username, status: p.status })),
+      spectatorCount: room.spectators.size,
+      battleSecondsLeft: room.battleEndsAt
+        ? Math.max(0, Math.ceil((room.battleEndsAt - Date.now()) / 1000))
+        : null,
+      createdAt: room.createdAt,
+    });
+  }
+  // Newest first.
+  out.sort((a, b) => b.createdAt - a.createdAt);
+  return out;
+}
+
+// Add a spectator to a room. Returns { error } or { room }.
+// Rules:
+//   - User can't spectate if they're currently playing in some room.
+//   - User can't spectate a private room.
+//   - User can't spectate a finished match.
+//   - Idempotent if they're already a spectator here (just refresh socket).
+export function spectateRoom(io, user, code, socketId) {
+  const room = rooms.get(code.toUpperCase());
+  if (!room) return { error: 'Match not found' };
+  if (room.isPrivate) return { error: 'This match is private' };
+  if (room.phase === PHASE.RESULT) return { error: 'Match is over' };
+  if (room.players[user.id]) return { error: 'You are a player in this match' };
+
+  // Evict from any prior spectator slot first (room-hop).
+  const priorCode = userToSpectateRoom.get(user.id);
+  if (priorCode && priorCode !== room.code) {
+    const priorRoom = rooms.get(priorCode);
+    if (priorRoom) leaveSpectate(io, user.id, priorRoom);
+  }
+
+  // Add (or refresh) spectator record.
+  room.spectators.set(user.id, {
+    id: user.id,
+    username: user.username,
+    socketId,
+    voted: null,
+  });
+  userToSpectateRoom.set(user.id, room.code);
+  if (io && socketId) {
+    io.sockets.sockets.get(socketId)?.join(room.code);
+  }
+  broadcast(io, room);
+  return { room };
+}
+
+// Remove a spectator from a room. `room` is optional (we'll look it up).
+export function leaveSpectate(io, userId, room = null) {
+  if (!room) {
+    const code = userToSpectateRoom.get(userId);
+    if (!code) return;
+    room = rooms.get(code);
+    if (!room) {
+      userToSpectateRoom.delete(userId);
+      return;
+    }
+  }
+  const s = room.spectators.get(userId);
+  if (s && io && s.socketId) {
+    io.sockets.sockets.get(s.socketId)?.leave(room.code);
+  }
+  // If they voted, decrement the tally so a leaver doesn't "lock in" a vote
+  // they can't speak for anymore. Only valid during VOTING.
+  if (s?.voted && room.phase === PHASE.VOTING && room.voteCounts[s.voted] > 0) {
+    room.voteCounts[s.voted]--;
+  }
+  room.spectators.delete(userId);
+  if (userToSpectateRoom.get(userId) === room.code) {
+    userToSpectateRoom.delete(userId);
+  }
+  broadcast(io, room);
+}
+
+export function getSpectateRoomForUser(userId) {
+  const code = userToSpectateRoom.get(userId);
+  return code ? rooms.get(code) : null;
 }
 
 export { snapshot };

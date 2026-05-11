@@ -18,9 +18,12 @@
 // reverb. The sound is similar enough at the wet levels we use.
 
 import * as Tone from 'tone';
-// lamejs ships its main entry as CommonJS — Vite handles it but the default
-// import is the namespace, so we destructure Mp3Encoder out.
-import lamejs from 'lamejs';
+// lamejs has a long-standing bug where it references its internal classes
+// (MPEGMode, Lame, BitStream) as globals before they're defined, which
+// crashes under Vite/Rollup at runtime even though the build succeeds.
+// @breezystack/lamejs is a maintained fork that fixes the packaging. Same
+// API, just doesn't blow up.
+import lamejs from '@breezystack/lamejs';
 import { SOUND_BUILDERS } from './sounds.js';
 import { STEPS_PER_BAR } from '../../../shared/gameRules.js';
 

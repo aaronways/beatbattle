@@ -39,6 +39,12 @@ app.get('/api/me/:id', (req, res) => {
   res.json({ user: u, recent: store.recentMatches(u.id, 20) });
 });
 
+// Public list of active matches anyone can spectate. Used by the match
+// browser on the home screen.
+app.get('/api/matches', (_req, res) => {
+  res.json({ matches: rooms.listPublicMatches() });
+});
+
 const server = http.createServer(app);
 const io = new IOServer(server, {
   cors: { origin: corsOrigin, credentials: true },
@@ -56,6 +62,11 @@ io.on('connection', (socket) => {
     const existing = rooms.getRoomForUser(user.id);
     if (existing) {
       rooms.attachSocket(io, existing, user.id, socket.id);
+    }
+    // Same for spectator role — keep them watching after a refresh.
+    const spectating = rooms.getSpectateRoomForUser(user.id);
+    if (spectating) {
+      rooms.spectateRoom(io, user, spectating.code, socket.id);
     }
     ack?.({ user });
   });
@@ -122,6 +133,18 @@ io.on('connection', (socket) => {
     if (!user) return;
     const room = rooms.getRoomForUser(user.id);
     if (room) rooms.rematch(io, room);
+  });
+
+  socket.on('spectate', ({ code }, ack) => {
+    if (!user) return ack?.({ error: 'No user' });
+    const r = rooms.spectateRoom(io, user, code, socket.id);
+    if (r.error) return ack?.({ error: r.error });
+    ack?.({ code: r.room.code });
+  });
+
+  socket.on('leaveSpectate', () => {
+    if (!user) return;
+    rooms.leaveSpectate(io, user.id);
   });
 
   socket.on('leaveRoom', () => {

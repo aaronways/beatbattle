@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { call, saveUsername, socket } from '../socket.js';
 
-export default function Home({ user, setUser, onEnterRoom, onPractice, onLeaderboard }) {
+export default function Home({ user, setUser, onEnterRoom, onPractice, onLeaderboard, onSpectate }) {
   const [username, setUsername] = useState(user?.username || '');
   const [joinCode, setJoinCode] = useState('');
   const [mode, setMode] = useState('idle'); // idle | queueing
@@ -104,6 +104,10 @@ export default function Home({ user, setUser, onEnterRoom, onPractice, onLeaderb
           <button className="btn big" onClick={onPractice}>
             <span className="big-label">Practice</span>
             <span className="small-label">Solo, no opponent</span>
+          </button>
+          <button className="btn big" onClick={onSpectate}>
+            <span className="big-label">Spectate</span>
+            <span className="small-label">Watch live matches</span>
           </button>
           <button className="btn big ghost" onClick={onLeaderboard}>
             <span className="big-label">Leaderboard</span>

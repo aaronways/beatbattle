@@ -62,25 +62,25 @@ io.on('connection', (socket) => {
 
   socket.on('createRoom', ({ ranked = false } = {}, ack) => {
     if (!user) return ack?.({ error: 'No user' });
-    const room = rooms.createPrivateRoom(io, user, { ranked });
-    rooms.attachSocket(io, room, user.id, socket.id);
+    const room = rooms.createPrivateRoom(io, user, { ranked }, socket.id);
     ack?.({ code: room.code });
   });
 
   socket.on('joinRoom', ({ code }, ack) => {
     if (!user) return ack?.({ error: 'No user' });
-    const r = rooms.joinByCode(io, user, code);
+    const r = rooms.joinByCode(io, user, code, socket.id);
     if (r.error) return ack?.({ error: r.error });
-    rooms.attachSocket(io, r.room, user.id, socket.id);
     ack?.({ code: r.room.code });
   });
 
   socket.on('quickBattle', (_payload, ack) => {
     if (!user) return ack?.({ error: 'No user' });
-    const r = rooms.quickBattle(io, user);
+    const r = rooms.quickBattle(io, user, socket.id);
     if (r.queued) return ack?.({ queued: true });
     if (r.room) {
-      rooms.attachSocket(io, r.room, user.id, socket.id);
+      // joinRoom inside quickBattle already attached this socket to the room
+      // channel, so we don't need a separate attachSocket call. Keeping the
+      // ack so the client knows the match landed.
       return ack?.({ code: r.room.code });
     }
     ack?.({ error: 'Could not match' });

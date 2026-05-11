@@ -22,7 +22,13 @@ const BATTLE_SECONDS = parseInt(process.env.BATTLE_SECONDS || DEFAULT_BATTLE_SEC
 
 const rooms = new Map();             // code → room
 const userToRoom = new Map();        // userId → room code
-let quickBattleQueue = [];           // [{ userId, joinedAt }]
+// Queue entries hold the socketId at the moment of queueing, so when a
+// match fires we can immediately join BOTH players' sockets to the new
+// room channel — not just the player who clicked Quick Battle second.
+// Without this, the first-queued player never receives the 'room' event
+// and appears stuck in matchmaking until some other action retriggers a
+// broadcast.
+let quickBattleQueue = [];           // [{ userId, socketId, joinedAt }]
 
 // ────────────────────────────────────────────────────────────────────────────
 // Room creation / lookup
@@ -123,36 +129,48 @@ function snapshot(room, viewerId = null) {
 // Public actions (called from socket handlers)
 // ────────────────────────────────────────────────────────────────────────────
 
-export function createPrivateRoom(io, user, { ranked = false } = {}) {
+export function createPrivateRoom(io, user, { ranked = false } = {}, socketId = null) {
   const room = newRoom({ ranked, isPrivate: true });
-  joinRoom(io, room, user);
+  joinRoom(io, room, user, socketId);
   return room;
 }
 
-export function joinByCode(io, user, code) {
+export function joinByCode(io, user, code, socketId = null) {
   const room = rooms.get(code.toUpperCase());
   if (!room) return { error: 'Room not found' };
   if (Object.keys(room.players).length >= 2 && !room.players[user.id]) {
     return { error: 'Room is full' };
   }
-  joinRoom(io, room, user);
+  joinRoom(io, room, user, socketId);
   return { room };
 }
 
-export function quickBattle(io, user) {
-  // Drop stale entries first.
+// Match a user against the quick-battle queue.
+//
+// `socketId` is the joining user's current socket. We need it for two reasons:
+//   (a) so when we DO match this user, their socket joins the room channel.
+//   (b) so when we QUEUE this user, we remember their socket — and when a
+//       future caller matches against them, we can join that queued user's
+//       socket to the room as well. Without (b), the first-queued player
+//       never receives the room broadcast and looks stuck.
+export function quickBattle(io, user, socketId) {
+  // Drop any stale entry for this user (re-clicked Quick Battle, reconnected).
   quickBattleQueue = quickBattleQueue.filter(e => e.userId !== user.id);
   // Match with the oldest waiting player if any.
   if (quickBattleQueue.length > 0) {
     const opponent = quickBattleQueue.shift();
     const opponentUser = store.getUser(opponent.userId);
-    if (!opponentUser) return quickBattle(io, user); // their account vanished, retry
+    if (!opponentUser) return quickBattle(io, user, socketId); // their account vanished, retry
     const room = newRoom({ ranked: true, isPrivate: false });
-    joinRoom(io, room, opponentUser);
-    joinRoom(io, room, user);
+    // Join the queued opponent first (passing their stored socketId), then
+    // the joining user. Each joinRoom() calls broadcast() at the end, so by
+    // the time the second joinRoom completes, both sockets are in the room
+    // channel and both clients receive the full snapshot.
+    joinRoom(io, room, opponentUser, opponent.socketId);
+    joinRoom(io, room, user, socketId);
     return { room };
   }
-  quickBattleQueue.push({ userId: user.id, joinedAt: Date.now() });
+  quickBattleQueue.push({ userId: user.id, socketId, joinedAt: Date.now() });
   return { queued: true };
 }
 

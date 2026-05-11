@@ -1,4 +1,4 @@
-import { TRACK_SLOTS, STEPS_PER_BAR, PITCHED_ROWS, PITCH_NAMES } from '../../../shared/gameRules.js';
+import { STEPS_PER_BAR, PITCHED_ROWS, PITCH_NAMES } from '../../../shared/gameRules.js';
 
 // The center pane. Renders one block per track. Two block flavours:
 //   - DrumTrack:    single row of step cells (binary on/off)
@@ -11,6 +11,8 @@ export default function Sequencer({
   beat, kit, currentStep, locked,
   armedSoundId, armedCategory,
   onToggleDrumStep, onToggleNote, onAssignSound, onPreview,
+  onClearTrack, onCopyTrack, onPasteTrack, onLoopFillTrack, onRemoveTrack,
+  clipboardType,
 }) {
   if (!beat) return null;
   const totalSteps = STEPS_PER_BAR * beat.bars;
@@ -49,20 +51,29 @@ export default function Sequencer({
       </div>
 
       {beat.tracks.map(track => {
-        const slot = TRACK_SLOTS.find(s => s.id === track.id);
-        const isAssignTarget = !!armedSoundId && armedCategory === slot?.category && !locked;
+        // Tracks now carry their own category/type, so we don't need a
+        // TRACK_SLOTS lookup. The slot reference here is just for the assign
+        // target check (which uses category).
+        const isAssignTarget = !!armedSoundId && armedCategory === track.category && !locked;
         const soundLabel = labelForSound(track.soundId);
-        const isPitched = slot?.type === 'pitched';
+        const isPitched = track.type === 'pitched';
+        // Paste is only enabled when the clipboard exists AND types match.
+        const canPaste = !locked && !!clipboardType && clipboardType === track.type;
 
         const headerProps = {
-          slot,
+          track,
           soundLabel,
           isAssignTarget,
           locked,
           armedSoundId,
           onAssignSound,
           onPreview,
-          trackSoundId: track.soundId,
+          onClearTrack,
+          onCopyTrack,
+          onPasteTrack,
+          onLoopFillTrack,
+          onRemoveTrack,
+          canPaste,
         };
 
         if (isPitched) {
@@ -97,33 +108,82 @@ export default function Sequencer({
 }
 
 // ────── Track header (meta column on the left) ───────────────────────────
-function TrackMeta({ slot, soundLabel, isAssignTarget, locked, armedSoundId, trackSoundId, onAssignSound, onPreview, compact }) {
+// Layout: label / sound name / preview button on top row, action buttons
+// (clear / copy / paste / loop-fill / remove) on a thin row below.
+function TrackMeta({
+  track, soundLabel, isAssignTarget, locked, armedSoundId,
+  onAssignSound, onPreview,
+  onClearTrack, onCopyTrack, onPasteTrack, onLoopFillTrack, onRemoveTrack,
+  canPaste, compact,
+}) {
+  const assignClick = () => isAssignTarget && onAssignSound(track.id, armedSoundId);
   return (
     <div
       className={'track-meta ' + (compact ? 'compact ' : '') + (isAssignTarget ? 'clickable' : '')}
-      onClick={() => isAssignTarget && onAssignSound(slot.id, armedSoundId)}
-      role={isAssignTarget ? 'button' : undefined}
-      tabIndex={isAssignTarget ? 0 : undefined}
-      onKeyDown={(e) => {
-        if (isAssignTarget && (e.key === 'Enter' || e.key === ' ')) {
-          e.preventDefault();
-          onAssignSound(slot.id, armedSoundId);
-        }
-      }}
     >
-      <div className="track-label">{slot?.label || ''}</div>
-      <div className="track-sound" title={soundLabel || ''}>
-        {soundLabel
-          ? <span className="track-sound-name">{soundLabel}</span>
-          : <span className="track-sound-empty">— empty —</span>}
+      {/* Top row IS the assign target — clicking anywhere here assigns the
+          armed sound. We don't put role=button on the outer wrapper because
+          it contains other <button> elements (the action row) and nesting
+          interactive ARIA roles confuses screen readers and breaks click
+          dispatch in some browsers. */}
+      <div
+        className="track-meta-top"
+        onClick={assignClick}
+        role={isAssignTarget ? 'button' : undefined}
+        tabIndex={isAssignTarget ? 0 : undefined}
+        onKeyDown={(e) => {
+          if (isAssignTarget && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            assignClick();
+          }
+        }}
+      >
+        <div className="track-label">{track.name || ''}</div>
+        <div className="track-sound" title={soundLabel || ''}>
+          {soundLabel
+            ? <span className="track-sound-name">{soundLabel}</span>
+            : <span className="track-sound-empty">— empty —</span>}
+        </div>
+        <button
+          className="preview-btn"
+          onClick={(e) => { e.stopPropagation(); track.soundId && onPreview(track.soundId); }}
+          disabled={!track.soundId}
+          title="Preview"
+          aria-label={`Preview ${track.name}`}
+        >▸</button>
       </div>
-      <button
-        className="preview-btn"
-        onClick={(e) => { e.stopPropagation(); trackSoundId && onPreview(trackSoundId); }}
-        disabled={!trackSoundId}
-        title="Preview"
-        aria-label={`Preview ${slot?.label}`}
-      >▸</button>
+      <div className="track-actions">
+        <button
+          className="track-act-btn"
+          onClick={() => onCopyTrack?.(track.id)}
+          disabled={locked}
+          title="Copy this track's pattern"
+        >COPY</button>
+        <button
+          className="track-act-btn"
+          onClick={() => onPasteTrack?.(track.id)}
+          disabled={!canPaste}
+          title={canPaste ? 'Paste pattern' : 'Copy a same-type pattern first'}
+        >PASTE</button>
+        <button
+          className="track-act-btn"
+          onClick={() => onLoopFillTrack?.(track.id)}
+          disabled={locked}
+          title="Loop bar 1 across all bars in this track"
+        >LOOP</button>
+        <button
+          className="track-act-btn"
+          onClick={() => onClearTrack?.(track.id)}
+          disabled={locked}
+          title="Clear this track"
+        >CLR</button>
+        <button
+          className="track-act-btn danger"
+          onClick={() => onRemoveTrack?.(track.id)}
+          disabled={locked}
+          title="Remove this track"
+        >✕</button>
+      </div>
     </div>
   );
 }
@@ -194,7 +254,7 @@ function PitchedTrack({ track, header, totalSteps, currentStep, locked, onToggle
                 ].join(' ')}
               >
                 {name}
-                {isRoot && <span className="pitch-octave">{root_octave_label(track.id)}</span>}
+                {isRoot && <span className="pitch-octave">{root_octave_label(track.category)}</span>}
               </div>
             );
           })}
@@ -238,8 +298,8 @@ function PitchedTrack({ track, header, totalSteps, currentStep, locked, onToggle
 
 // Small helper to show which octave the root note actually sits at (so the
 // player knows bass C2 is two octaves below melody C4).
-function root_octave_label(trackId) {
-  if (trackId === 'bass')   return '2';
-  if (trackId === 'melody') return '4';
+function root_octave_label(category) {
+  if (category === 'bass')   return '2';
+  if (category === 'melody') return '4';
   return '';
 }

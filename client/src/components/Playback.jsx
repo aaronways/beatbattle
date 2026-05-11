@@ -70,29 +70,56 @@ export default function Playback({ room }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room.phase]);
 
+  const replayTimeoutRef = useRef(null);
   const replay = async (which) => {
     const beat = beats?.[which];
     if (!hasContent(beat)) {
       alert(`Beat ${which} is empty — nothing was submitted.`);
       return;
     }
+    // Clear any prior replay so back-to-back replays don't cut each other off.
+    if (replayTimeoutRef.current) {
+      clearTimeout(replayTimeoutRef.current);
+      replayTimeoutRef.current = null;
+    }
     await engine.start();
     engine.schedule(beat);
     engine.play();
-    setTimeout(() => engine.stop(), durationMs(beat));
+    replayTimeoutRef.current = setTimeout(() => {
+      engine.stop();
+      replayTimeoutRef.current = null;
+    }, durationMs(beat));
   };
+
+  // Cleanup on unmount: stop any in-flight replay.
+  useEffect(() => () => {
+    if (replayTimeoutRef.current) {
+      clearTimeout(replayTimeoutRef.current);
+      engine.stop();
+    }
+  }, []);
 
   const vote = async (which) => {
+    if (voted) return;
+    // Optimistically mark as voted so the button disables instantly.
+    // If the server rejects (already voted, wrong phase), restore.
+    setVoted(true);
     const res = await call('vote', { choice: which });
-    if (res?.error) alert(res.error);
-    else setVoted(true);
+    if (res?.error) {
+      setVoted(false);
+      alert(res.error);
+    }
   };
 
-  // What is "you" — A, B, or neither (shouldn't happen for an active player).
-  const you = room.players.find(p => p.isYou);
-  const yourBeatIs = room.playback?.ownership
-    ? (you?.username === room.playback.ownership.A ? 'A' : 'B')
-    : null;
+  // Identify which letter is the viewer's own beat.
+  //   - During VOTING: server tells us via `playback.youAre` (anonymized — the
+  //     other letter is not labeled).
+  //   - During RESULT: ownership is revealed for both letters.
+  //   - Spectators: never have an "own" beat — youAre is null.
+  const yourBeatIs = room.playback?.youAre
+    || (room.playback?.ownership
+      ? (room.players.find(p => p.isYou)?.username === room.playback.ownership.A ? 'A' : 'B')
+      : null);
 
   const isVoting = room.phase === PHASE.VOTING;
 

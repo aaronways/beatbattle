@@ -60,33 +60,62 @@ export async function renderBeatToBuffer(beat, { loops = 4 } = {}) {
     Tone.setContext(offlineCtx);
 
     // ── Master FX (offline-friendly substitutes) ──────────────────────
-    const reverb = new Tone.JCReverb({ roomSize: 0.75, wet: beat.effects.reverb });
-    const delay  = new Tone.FeedbackDelay({
+    const masterReverbWet = new Tone.JCReverb({ roomSize: 0.75, wet: beat.effects.reverb });
+    const masterDelayWet  = new Tone.FeedbackDelay({
       delayTime: '8n.', feedback: 0.3, wet: beat.effects.delay,
     });
-    const filter = new Tone.Filter({
+    const masterFilter = new Tone.Filter({
       frequency: beat.effects.filter, type: 'lowpass', rolloff: -24,
     });
-    const drive  = new Tone.Distortion({
+    const masterDrive  = new Tone.Distortion({
       distortion: beat.effects.drive,
       wet: beat.effects.drive > 0 ? 1 : 0,
     });
     const limiter = new Tone.Limiter(-1);
-    const master  = new Tone.Gain(0.9);
-    drive.chain(filter, delay, reverb, limiter, master, offlineCtx.destination);
+    const masterOut = new Tone.Gain(0.9);
 
-    // ── Per-track channels ────────────────────────────────────────────
+    // Shared reverb/delay buses for per-track sends (mirrors engine.js routing).
+    const busReverb = new Tone.Gain(1);
+    const busDelay  = new Tone.Gain(1);
+    const reverbReturn = new Tone.JCReverb({ roomSize: 0.85, wet: 1 });
+    const delayReturn  = new Tone.FeedbackDelay({ delayTime: '8n.', feedback: 0.45, wet: 1 });
+    busReverb.connect(reverbReturn);
+    reverbReturn.connect(masterFilter);
+    busDelay.connect(delayReturn);
+    delayReturn.connect(masterFilter);
+
+    masterDrive.connect(masterFilter);
+    masterFilter.chain(masterDelayWet, masterReverbWet, limiter, masterOut, offlineCtx.destination);
+
+    // ── Per-track strips (filter → drive → channel → dry/sends) ───────
     const anySolo = beat.tracks.some(t => t.solo);
-    const channels = new Map();
+    const strips = new Map();
     for (const track of beat.tracks) {
       const muted = track.muted || (anySolo && !track.solo);
-      const ch = new Tone.Channel({
+      const filterHz = typeof track.filter === 'number' ? track.filter : 20000;
+      const driveAmt = typeof track.drive  === 'number' ? track.drive  : 0;
+      const sendsR = track.sends?.reverb || 0;
+      const sendsD = track.sends?.delay  || 0;
+
+      const filter = new Tone.Filter({ frequency: filterHz, type: 'lowpass', rolloff: -12 });
+      const drive  = new Tone.Distortion({ distortion: driveAmt, wet: driveAmt > 0 ? 1 : 0 });
+      const channel = new Tone.Channel({
         volume: track.volume <= 0 ? -Infinity : Tone.gainToDb(track.volume),
         pan: Math.max(-1, Math.min(1, track.pan || 0)),
         mute: muted,
       });
-      ch.connect(drive);
-      channels.set(track.id, ch);
+      const revSend = new Tone.Gain(sendsR);
+      const dlySend = new Tone.Gain(sendsD);
+
+      filter.connect(drive);
+      drive.connect(channel);
+      channel.connect(masterDrive);   // dry
+      channel.connect(revSend);
+      channel.connect(dlySend);
+      revSend.connect(busReverb);
+      dlySend.connect(busDelay);
+
+      strips.set(track.id, filter);   // synth input is filter (top of strip)
     }
 
     // ── Schedule the pattern on the OFFLINE transport ─────────────────
@@ -107,9 +136,9 @@ export async function renderBeatToBuffer(beat, { loops = 4 } = {}) {
         if (!cell || cell.length === 0) continue;
         const builder = SOUND_BUILDERS[track.soundId];
         if (!builder) continue;
-        const ch = channels.get(track.id);
+        const stripIn = strips.get(track.id);
         for (const semis of cell) {
-          const trigger = builder(ch);
+          const trigger = builder(stripIn);
           trigger(time, semis | 0);
         }
       }

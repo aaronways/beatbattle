@@ -2,6 +2,7 @@
   "name": "beatbattle",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "install:all": "npm install && npm install --prefix server && npm install --prefix client",
     "dev:server": "npm run dev --prefix server",

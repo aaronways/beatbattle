@@ -6,7 +6,8 @@ import { engine } from '../audio/engine.js';
 import { exportBeatAsMp3, downloadBlob } from '../audio/export.js';
 import { call } from '../socket.js';
 import {
-  makeEmptyBeat, BPM_MIN, BPM_MAX, TRACK_SLOTS, PHASE,
+  makeEmptyBeat, makeTrack, maxTracksForCategory,
+  BPM_MIN, BPM_MAX, TRACK_SLOTS, PHASE,
 } from '../../../shared/gameRules.js';
 
 // Cap so the redo stack can't grow unbounded over a 10-min match.
@@ -39,6 +40,12 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
   const [armedSoundId, setArmedSoundId] = useState(null);
   const [exportStatus, setExportStatus] = useState(null); // null | 'rendering' | 'encoding'
   const [exportLoops, setExportLoops] = useState(4);      // how many times the pattern repeats in the export
+  // Per-track pattern clipboard. Keyed by source category so paste only
+  // works onto matching-category tracks (preventing nonsense like pasting
+  // a melody into a kick lane). Holds either:
+  //   - { steps: [...] } for full-pattern copy of a single track
+  //   - null if nothing copied
+  const [trackClipboard, setTrackClipboard] = useState(null);
   const submittedRef = useRef(false);
   const beatRef = useRef(beat);
   beatRef.current = beat;
@@ -52,38 +59,58 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
 
   // ── History helpers ────────────────────────────────────────────────────
   // Snapshot the current beat onto the undo stack and clear the redo stack.
-  // Call this before any user-initiated mutation. Programmatic mutations
+  // Call this BEFORE any user-initiated mutation. Programmatic mutations
   // (e.g. the auto-fill on kit arrival) deliberately skip this.
+  //
+  // NOTE on the race condition: previously this called `setHistory(h => [...h, beatRef.current])`
+  // but `beatRef.current` was only updated AFTER a re-render. Two rapid
+  // clicks in the same tick would both capture the same beat, corrupting
+  // history. We now update `beatRef.current` synchronously inside
+  // `applyBeatMutation` (the wrapper every editor action goes through), so
+  // pushHistory always sees the latest snapshot.
   const pushHistory = useCallback(() => {
+    const snapshot = beatRef.current;
     setHistory(h => {
-      const next = [...h, beatRef.current];
-      if (next.length > HISTORY_LIMIT) next.shift();
+      const next = h.length >= HISTORY_LIMIT ? [...h.slice(1), snapshot] : [...h, snapshot];
       return next;
     });
     setRedoStack([]);
   }, []);
 
+  // Undo/redo use ONLY pure top-level state updates. No nested setState
+  // inside an updater (which would be undefined behavior in React 18
+  // StrictMode and breaks under concurrent rendering).
   const undo = useCallback(() => {
     if (locked) return;
-    setHistory(h => {
-      if (!h.length) return h;
-      const prev = h[h.length - 1];
-      setRedoStack(r => [...r, beatRef.current]);
-      setBeat(prev);
-      return h.slice(0, -1);
-    });
-  }, [locked]);
+    if (history.length === 0) return;
+    const prev = history[history.length - 1];
+    setRedoStack(r => [...r, beatRef.current]);
+    setHistory(h => h.slice(0, -1));
+    setBeat(prev);
+    beatRef.current = prev;   // keep ref in lockstep
+  }, [locked, history]);
 
   const redo = useCallback(() => {
     if (locked) return;
-    setRedoStack(r => {
-      if (!r.length) return r;
-      const next = r[r.length - 1];
-      setHistory(h => [...h, beatRef.current]);
-      setBeat(next);
-      return r.slice(0, -1);
-    });
-  }, [locked]);
+    if (redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1];
+    setHistory(h => [...h, beatRef.current]);
+    setRedoStack(r => r.slice(0, -1));
+    setBeat(next);
+    beatRef.current = next;
+  }, [locked, redoStack]);
+
+  // All editor mutations go through this wrapper. It (a) pushes history,
+  // (b) updates the beat state, (c) keeps beatRef synchronized so a follow-up
+  // pushHistory in the same tick sees the new value.
+  const applyBeatMutation = useCallback((updater) => {
+    if (locked) return;
+    pushHistory();
+    const next = updater(beatRef.current);
+    if (next === beatRef.current) return;  // no-op skipped
+    beatRef.current = next;
+    setBeat(next);
+  }, [locked, pushHistory]);
 
   // ── Engine wiring ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -93,8 +120,12 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
 
   useEffect(() => {
     if (playing) {
-      engine.schedule(beat);
-      engine.play();
+      // Re-schedule the engine when the beat data changes mid-play, but
+      // preserve the current playhead position so the loop doesn't jump
+      // back to bar 1 on every step toggle. engine.schedule() captures the
+      // beat by reference and re-arms the transport; we then nudge the
+      // transport back to where it was before this re-arm.
+      engine.scheduleAtPosition(beat);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [beat, playing]);
@@ -106,17 +137,23 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
     if (!kit) return;
     setBeat(prev => {
       let changed = false;
+      // Track which sounds have already been assigned to other tracks, so a
+      // second "kick" track auto-fills with a different kick (when possible)
+      // rather than duplicating the first.
+      const used = new Set(prev.tracks.map(t => t.soundId).filter(Boolean));
       const tracks = prev.tracks.map(t => {
         if (t.soundId) return t;
-        const slot = TRACK_SLOTS.find(s => s.id === t.id);
-        const sounds = kit.sounds[slot?.category] || [];
+        const sounds = kit.sounds[t.category] || [];
         if (!sounds.length) return t;
-        let pick = sounds[0];
-        if (t.id === 'hatO') {
-          pick = sounds.find(s => s.id.includes('open')) || sounds[1] || sounds[0];
-        } else if (t.id === 'hatC') {
-          pick = sounds.find(s => s.id.includes('closed')) || sounds[0];
+        // Default: first unused sound in the category. Open-hat lanes prefer
+        // an "open" sound; closed-hat lanes prefer "closed".
+        let pick = sounds.find(s => !used.has(s.id)) || sounds[0];
+        if (t.preferOpenHat) {
+          pick = sounds.find(s => s.id.includes('open')) || pick;
+        } else if (t.category === 'hat' && !t.preferOpenHat) {
+          pick = sounds.find(s => s.id.includes('closed') && !used.has(s.id)) || pick;
         }
+        used.add(pick.id);
         changed = true;
         return { ...t, soundId: pick.id };
       });
@@ -154,81 +191,97 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
   // ── Step / note mutations ──────────────────────────────────────────────
   // Drum cells are binary: empty array ↔ [0]. Pitched cells hold a list of
   // semitone offsets and we toggle individual pitches in/out of the set.
-  const toggleDrumStep = (trackId, idx) => {
-    if (locked) return;
-    pushHistory();
-    setBeat(b => ({
-      ...b,
-      tracks: b.tracks.map(t => t.id === trackId
-        ? {
-            ...t,
-            steps: t.steps.map((cell, i) => {
-              if (i !== idx) return cell;
-              return cell && cell.length ? [] : [0];
-            }),
-          }
-        : t),
-    }));
-  };
+  const toggleDrumStep = (trackId, idx) => applyBeatMutation(b => ({
+    ...b,
+    tracks: b.tracks.map(t => t.id === trackId
+      ? {
+          ...t,
+          steps: t.steps.map((cell, i) => {
+            if (i !== idx) return cell;
+            return cell && cell.length ? [] : [0];
+          }),
+        }
+      : t),
+  }));
 
-  const toggleNote = (trackId, idx, semitone) => {
-    if (locked) return;
-    pushHistory();
-    setBeat(b => ({
-      ...b,
-      tracks: b.tracks.map(t => t.id === trackId
-        ? {
-            ...t,
-            steps: t.steps.map((cell, i) => {
-              if (i !== idx) return cell;
-              const set = new Set(cell || []);
-              if (set.has(semitone)) set.delete(semitone);
-              else set.add(semitone);
-              return Array.from(set).sort((a, b) => a - b);
-            }),
-          }
-        : t),
-    }));
-  };
+  const toggleNote = (trackId, idx, semitone) => applyBeatMutation(b => ({
+    ...b,
+    tracks: b.tracks.map(t => t.id === trackId
+      ? {
+          ...t,
+          steps: t.steps.map((cell, i) => {
+            if (i !== idx) return cell;
+            const set = new Set(cell || []);
+            if (set.has(semitone)) set.delete(semitone);
+            else set.add(semitone);
+            return Array.from(set).sort((a, b) => a - b);
+          }),
+        }
+      : t),
+  }));
 
   const assignSoundToTrack = (trackId, soundId) => {
-    if (locked) return;
-    pushHistory();
-    setBeat(b => ({
+    applyBeatMutation(b => ({
       ...b,
       tracks: b.tracks.map(t => t.id === trackId ? { ...t, soundId } : t),
     }));
     setArmedSoundId(null);
   };
 
+  // updateTrack is the hot path for slider drags. We DON'T push history here
+  // on every change — instead, we group drags into single history entries
+  // via beginDrag/endDrag (called from mouse-down / mouse-up). See onDragStart.
+  // For non-drag changes (mute/solo button clicks), we always push history.
+  const dragInProgressRef = useRef(false);
   const updateTrack = (trackId, patch) => {
     if (locked) return;
-    pushHistory();
-    setBeat(b => ({
-      ...b,
-      tracks: b.tracks.map(t => t.id === trackId ? { ...t, ...patch } : t),
-    }));
+    if (!dragInProgressRef.current) pushHistory();
+    const next = {
+      ...beatRef.current,
+      tracks: beatRef.current.tracks.map(t => t.id === trackId ? { ...t, ...patch } : t),
+    };
+    beatRef.current = next;
+    setBeat(next);
   };
 
   const updateEffects = (patch) => {
     if (locked) return;
-    pushHistory();
-    setBeat(b => ({ ...b, effects: { ...b.effects, ...patch } }));
+    if (!dragInProgressRef.current) pushHistory();
+    const next = { ...beatRef.current, effects: { ...beatRef.current.effects, ...patch } };
+    beatRef.current = next;
+    setBeat(next);
   };
+
+  // Begin/end a drag session — call from onPointerDown / onPointerUp on
+  // continuous-input controls (sliders, knobs). pushHistory fires once at
+  // the start; all changes within the drag share that history entry.
+  const beginDrag = useCallback(() => {
+    if (locked) return;
+    if (dragInProgressRef.current) return;
+    dragInProgressRef.current = true;
+    pushHistory();
+  }, [locked, pushHistory]);
+
+  const endDrag = useCallback(() => {
+    dragInProgressRef.current = false;
+  }, []);
 
   const setBpm = (bpm) => {
     if (locked) return;
     const v = Math.max(BPM_MIN, Math.min(BPM_MAX, bpm));
+    if (v === beatRef.current.bpm) return;
     pushHistory();
-    setBeat(b => ({ ...b, bpm: v }));
+    const next = { ...beatRef.current, bpm: v };
+    beatRef.current = next;
+    setBeat(next);
     engine.setBpm(v);
   };
 
   const setBars = (bars) => {
     if (locked) return;
     const safeBars = Math.max(1, Math.min(MAX_BARS, bars | 0));
-    pushHistory();
-    setBeat(b => {
+    if (safeBars === beatRef.current.bars) return;
+    applyBeatMutation(b => {
       const newSteps = 16 * safeBars;
       return {
         ...b,
@@ -248,40 +301,127 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
   // Doubles the pattern: 1 bar → 2 bars (bar 2 = bar 1), capped at MAX_BARS.
   // If we're at the cap, no-op. If doubling would overflow, copy as much as
   // fits onto the end.
-  const duplicatePattern = () => {
-    if (locked) return;
-    pushHistory();
-    setBeat(b => {
-      if (b.bars >= MAX_BARS) return b;
-      const newBars = Math.min(b.bars * 2, MAX_BARS);
-      const copyStepCount = (newBars - b.bars) * 16;
-      return {
-        ...b,
-        bars: newBars,
-        tracks: b.tracks.map(t => ({
-          ...t,
-          // Deep-clone the source cells so future edits to bar 1 don't
-          // accidentally mutate the duplicated cells via shared array refs.
-          steps: [
-            ...t.steps,
-            ...t.steps.slice(0, copyStepCount).map(cell => [...(cell || [])]),
-          ],
-        })),
-      };
-    });
-  };
+  const duplicatePattern = () => applyBeatMutation(b => {
+    if (b.bars >= MAX_BARS) return b;
+    const newBars = Math.min(b.bars * 2, MAX_BARS);
+    const copyStepCount = (newBars - b.bars) * 16;
+    return {
+      ...b,
+      bars: newBars,
+      tracks: b.tracks.map(t => ({
+        ...t,
+        steps: [
+          ...t.steps,
+          ...t.steps.slice(0, copyStepCount).map(cell => [...(cell || [])]),
+        ],
+      })),
+    };
+  });
 
   const clearAll = () => {
     if (locked) return;
     if (!confirm('Clear all steps?')) return;
-    pushHistory();
-    setBeat(b => ({
+    applyBeatMutation(b => ({
       ...b,
-      tracks: b.tracks.map(t => ({
-        ...t,
-        steps: t.steps.map(() => []),
-      })),
+      tracks: b.tracks.map(t => ({ ...t, steps: t.steps.map(() => []) })),
     }));
+  };
+
+  // ── Per-track pattern operations ───────────────────────────────────────
+  const clearTrack = (trackId) => {
+    if (locked) return;
+    if (!confirm('Clear this track?')) return;
+    applyBeatMutation(b => ({
+      ...b,
+      tracks: b.tracks.map(t => t.id === trackId
+        ? { ...t, steps: t.steps.map(() => []) }
+        : t),
+    }));
+  };
+
+  const copyTrack = (trackId) => {
+    const src = beatRef.current.tracks.find(t => t.id === trackId);
+    if (!src) return;
+    setTrackClipboard({
+      category: src.category,
+      type: src.type,
+      steps: src.steps.map(cell => [...(cell || [])]),
+    });
+  };
+
+  const pasteTrack = (trackId) => {
+    if (locked || !trackClipboard) return;
+    const dst = beatRef.current.tracks.find(t => t.id === trackId);
+    if (!dst) return;
+    if (dst.type !== trackClipboard.type) {
+      alert(`Can't paste a ${trackClipboard.type} pattern into a ${dst.type} track.`);
+      return;
+    }
+    applyBeatMutation(b => {
+      const targetLen = b.tracks.find(t => t.id === trackId).steps.length;
+      const clipped = trackClipboard.steps.slice(0, targetLen);
+      const padded = clipped.length === targetLen
+        ? clipped.map(c => [...c])
+        : [...clipped.map(c => [...c]), ...Array.from({ length: targetLen - clipped.length }, () => [])];
+      return {
+        ...b,
+        tracks: b.tracks.map(t => t.id === trackId ? { ...t, steps: padded } : t),
+      };
+    });
+  };
+
+  const loopFillTrack = (trackId) => applyBeatMutation(b => ({
+    ...b,
+    tracks: b.tracks.map(t => {
+      if (t.id !== trackId) return t;
+      const oneBar = t.steps.slice(0, 16).map(c => [...(c || [])]);
+      const out = [];
+      for (let i = 0; i < t.steps.length; i++) {
+        out.push([...oneBar[i % 16]]);
+      }
+      return { ...t, steps: out };
+    }),
+  }));
+
+  const addTrack = (category) => {
+    if (locked) return;
+    const cap = maxTracksForCategory(category);
+    const existing = beatRef.current.tracks.filter(t => t.category === category);
+    if (existing.length >= cap) {
+      alert(`Max ${cap} ${category} track${cap > 1 ? 's' : ''}.`);
+      return;
+    }
+    const usedNums = new Set(existing.map(t => parseInt(t.id.split('-').pop(), 10)).filter(Number.isFinite));
+    let n = 1;
+    while (usedNums.has(n)) n++;
+    const slot = TRACK_SLOTS.find(s => s.category === category);
+    const label = `${slot?.label || category} ${n}`;
+    applyBeatMutation(b => {
+      const stepCount = b.bars * 16;
+      const newTrack = makeTrack({
+        id: `${category}-${n}`,
+        label,
+        category,
+        type: slot?.type || 'drum',
+      }, stepCount);
+      if (kit) {
+        const used = new Set(b.tracks.map(t => t.soundId).filter(Boolean));
+        const choice = (kit.sounds[category] || []).find(s => !used.has(s.id)) || (kit.sounds[category] || [])[0];
+        if (choice) newTrack.soundId = choice.id;
+      }
+      return { ...b, tracks: [...b.tracks, newTrack] };
+    });
+  };
+
+  const removeTrack = (trackId) => {
+    if (locked) return;
+    if (!confirm('Remove this track? All its notes will be lost.')) return;
+    applyBeatMutation(b => ({
+      ...b,
+      tracks: b.tracks.filter(t => t.id !== trackId),
+    }));
+    // Tell the engine to dispose this track's strip so we don't leak nodes.
+    engine.removeTrackStrip?.(trackId);
   };
 
   // ── MP3 export ─────────────────────────────────────────────────────────
@@ -319,16 +459,19 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
   };
 
   const doSubmit = async () => {
-    if (submitted) return;
-    setSubmitted(true);
+    // Use the ref (not state) so this stays correct across renders.
+    // If we used `submitted` from state closure, a stale-closure version
+    // of this function could re-submit even after a previous submit.
+    if (submittedRef.current) return;
     submittedRef.current = true;
+    setSubmitted(true);
     engine.stop();
     setPlaying(false);
     const res = await call('submitBeat', { beat: beatRef.current });
     if (res?.error) {
       // Server rejected — unlock so the player can fix and retry.
-      setSubmitted(false);
       submittedRef.current = false;
+      setSubmitted(false);
       alert(res.error);
     } else {
       onSubmitted?.();
@@ -340,12 +483,16 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
   // Esc: cancel armed sound. Use a ref to call the latest closures without
   // re-binding the listener every render.
   const handlersRef = useRef({});
-  handlersRef.current = { togglePlay, undo, redo, setArmedSoundId };
+  handlersRef.current = { togglePlay, undo, redo, setArmedSoundId, locked };
   useEffect(() => {
     const onKey = (e) => {
       const tag = e.target.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
       const h = handlersRef.current;
+      // Lock-out: no editor-affecting shortcuts during PLAYBACK/VOTING/RESULT.
+      if (h.locked && (e.code === 'Space' || ((e.metaKey || e.ctrlKey) && (e.key.toLowerCase() === 'z' || e.key.toLowerCase() === 'y')))) {
+        return;
+      }
       if (e.code === 'Space') { e.preventDefault(); h.togglePlay(); }
       else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); h.undo(); }
       else if ((e.metaKey || e.ctrlKey) && ((e.key.toLowerCase() === 'z' && e.shiftKey) || e.key.toLowerCase() === 'y')) { e.preventDefault(); h.redo(); }
@@ -398,7 +545,7 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
               <span className="timer-num practice">∞</span>
             </div>
           ) : (
-            <div className={'timer ' + (room?.battleSecondsLeft <= 30 ? 'urgent' : '')}>
+            <div className={'timer ' + (typeof room?.battleSecondsLeft === 'number' && room.battleSecondsLeft <= 30 ? 'urgent' : '')}>
               <span className="timer-label">TIME LEFT</span>
               <span className="timer-num">{timeStr(room?.battleSecondsLeft)}</span>
             </div>
@@ -455,6 +602,18 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
               onToggleNote={toggleNote}
               onAssignSound={assignSoundToTrack}
               onPreview={previewSound}
+              onClearTrack={clearTrack}
+              onCopyTrack={copyTrack}
+              onPasteTrack={pasteTrack}
+              onLoopFillTrack={loopFillTrack}
+              onRemoveTrack={removeTrack}
+              clipboardType={trackClipboard?.type}
+            />
+            <AddTrackBar
+              beat={beat}
+              kit={kit}
+              locked={locked}
+              onAddTrack={addTrack}
             />
           </div>
         </div>
@@ -464,6 +623,8 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
           locked={locked}
           onUpdateTrack={updateTrack}
           onUpdateEffects={updateEffects}
+          onBeginDrag={beginDrag}
+          onEndDrag={endDrag}
         />
       </div>
 
@@ -564,6 +725,44 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
             : "Time's up — your beat is locked in."}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Add Track bar ─────────────────────────────────────────────────────────
+// Renders one button per kit category that has room for another track.
+// Disabled when the category is already at its cap, so the player sees the
+// limit (rather than the button silently doing nothing).
+const ADD_TRACK_CATEGORIES = [
+  { key: 'kick',   label: '+ Kick'    },
+  { key: 'snare',  label: '+ Snare'   },
+  { key: 'clap',   label: '+ Clap'    },
+  { key: 'hat',    label: '+ Hat'     },
+  { key: 'bass',   label: '+ Bass'    },
+  { key: 'melody', label: '+ Melody'  },
+  { key: 'fx',     label: '+ FX'      },
+];
+
+function AddTrackBar({ beat, kit, locked, onAddTrack }) {
+  if (!kit) return null;
+  return (
+    <div className="add-track-bar">
+      <span className="add-track-label">ADD TRACK</span>
+      {ADD_TRACK_CATEGORIES.map(({ key, label }) => {
+        const count = beat.tracks.filter(t => t.category === key).length;
+        const cap = maxTracksForCategory(key);
+        const atCap = count >= cap;
+        const noSoundsInKit = !(kit.sounds[key] || []).length;
+        return (
+          <button
+            key={key}
+            className="btn small ghost add-track-btn"
+            onClick={() => onAddTrack(key)}
+            disabled={locked || atCap || noSoundsInKit}
+            title={atCap ? `Max ${cap} ${key} tracks` : noSoundsInKit ? `No ${key} sounds in kit` : `Add a ${key} track`}
+          >{label} <span className="add-track-count">{count}/{cap}</span></button>
+        );
+      })}
     </div>
   );
 }

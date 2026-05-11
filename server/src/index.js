@@ -123,7 +123,11 @@ io.on('connection', (socket) => {
 
   socket.on('vote', ({ choice }, ack) => {
     if (!user) return ack?.({ error: 'No user' });
-    const room = rooms.getRoomForUser(user.id);
+    // Vote lookup: a user might be a player OR a spectator. Check both maps;
+    // spectators got vote permission as part of the spectator feature but
+    // the original handler only looked up the player room, silently rejecting
+    // every spectator vote with "Not in room".
+    const room = rooms.getRoomForUser(user.id) || rooms.getSpectateRoomForUser(user.id);
     if (!room) return ack?.({ error: 'Not in room' });
     const r = rooms.castVote(io, room, user.id, choice);
     ack?.(r);

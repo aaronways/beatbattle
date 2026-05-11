@@ -1255,3 +1255,145 @@ input:focus, select:focus { border-color: var(--accent); }
 .spec-player-card.disconnected { border-color: var(--accent-warm); opacity: 0.7; }
 .spec-player-card.disconnected .spec-player-status { color: var(--accent-warm); }
 .spec-note { text-align: center; }
+
+/* ── Per-track action buttons (inside TrackMeta) ─────────────────────── */
+.track-meta-top {
+  display: grid;
+  grid-template-columns: 60px 1fr 26px;
+  align-items: center;
+  gap: 6px;
+}
+.track-actions {
+  display: flex;
+  gap: 3px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.track-act-btn {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  background: var(--bg-2);
+  color: var(--fg-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.1s;
+}
+.track-act-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.track-act-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.track-act-btn.danger:hover:not(:disabled) {
+  background: var(--accent-warm);
+  border-color: var(--accent-warm);
+}
+/* The track meta block grows taller now to accommodate the action row. */
+.track-meta { display: block; }   /* override the earlier grid layout */
+.track-meta.compact { padding-bottom: 6px; }
+
+/* ── Add Track bar ───────────────────────────────────────────────────── */
+.add-track-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  background: var(--bg-2);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-md);
+  align-items: center;
+}
+.add-track-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  color: var(--fg-2);
+  padding-right: 8px;
+}
+.add-track-btn {
+  font-size: 10px !important;
+  letter-spacing: 0.5px !important;
+  padding: 4px 10px !important;
+}
+.add-track-count {
+  opacity: 0.55;
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+/* ── Expanded per-track mixer row ────────────────────────────────────── */
+.mix-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.mix-row-v.open { background: var(--bg-3); }
+.mix-expand {
+  background: transparent;
+  border: none;
+  color: var(--fg-2);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.mix-expand:hover { color: var(--fg-0); }
+.mix-row-fx {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mini-slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mini-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--fg-2);
+  width: 24px;
+  flex-shrink: 0;
+}
+.mini-val {
+  font-size: 9px;
+  color: var(--fg-2);
+  width: 36px;
+  text-align: right;
+  font-family: 'JetBrains Mono', monospace;
+  flex-shrink: 0;
+}
+
+/* ── Connection error full-screen state ──────────────────────────────── */
+.connection-error {
+  min-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 40px;
+  text-align: center;
+}
+.connection-error .error-msg {
+  color: var(--accent-warm);
+  font-size: 16px;
+  max-width: 500px;
+}
+
+/* ── Spectator winner banner (neutral, no win/loss framing) ──────────── */
+.banner.neutral {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: white;
+}

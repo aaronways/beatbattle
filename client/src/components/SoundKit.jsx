@@ -1,5 +1,3 @@
-import { TRACK_SLOTS } from '../../../shared/gameRules.js';
-
 // Group raw kit categories into the four user-facing panels per design spec.
 // Drums folds in kick/snare/clap/hat — they all live under one section.
 const KIT_GROUPS = [
@@ -8,12 +6,6 @@ const KIT_GROUPS = [
   { id: 'melody', label: 'MELODY', cats: ['melody']                        },
   { id: 'fx',     label: 'FX',     cats: ['fx']                            },
 ];
-
-// Map a category back to the lane(s) that consume it. Used for the
-// "→ assigned to: Kick" hint next to each sound.
-function lanesForCategory(cat) {
-  return TRACK_SLOTS.filter(s => s.category === cat).map(s => s.id);
-}
 
 export default function SoundKit({
   kit, beat, locked, armedSoundId, onArm, onPreview,
@@ -27,12 +19,12 @@ export default function SoundKit({
     );
   }
 
-  // Map soundId → list of lane labels currently using it.
+  // Map soundId → list of lane labels currently using it. Walks the live
+  // tracks list (which can be dynamic now), not the static TRACK_SLOTS.
   const usedBy = {};
   for (const t of beat.tracks) {
     if (!t.soundId) continue;
-    const slot = TRACK_SLOTS.find(s => s.id === t.id);
-    (usedBy[t.soundId] = usedBy[t.soundId] || []).push(slot?.label || t.id);
+    (usedBy[t.soundId] = usedBy[t.soundId] || []).push(t.name || t.id);
   }
 
   return (

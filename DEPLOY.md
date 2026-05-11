@@ -119,7 +119,10 @@ For any of them, the requirements are the same: Node 18+, `npm install` builds, 
 
 ## Known limitations of this deployment
 
-- **State is in-memory.** Restart the server and you lose all leaderboard data, active rooms, ELO history. Fine for a hobby launch. To persist: swap `server/src/store.js` for a SQLite-backed version. The store API is intentionally narrow (`getOrCreateUser`, `recordMatch`, `leaderboard`, `recentMatches`) — should be ~50 lines of SQL.
+- **State persistence depends on disk setup.** The store writes to a JSON file (`./.data/store.json` by default). On Render's free tier the filesystem is ephemeral — the file gets wiped on every redeploy. To actually persist leaderboard and ELO across restarts, you need one of:
+  - **Add a Render Disk** ($1/mo). Render → service → Disks → Add Disk. Mount path: `/var/data`, size: 1 GB. Then set the env var `DATA_DIR=/var/data`. Restart. Now writes survive redeploys.
+  - **Switch host** to one with persistent disk by default (Fly.io volumes, DigitalOcean, etc.)
+  - **Swap the store** for an external DB. The store.js API is intentionally narrow (`getOrCreateUser`, `recordMatch`, `leaderboard`, `recentMatches`) — about 50 lines of code to swap for SQLite, Postgres (Supabase/Neon), or Turso.
 - **No horizontal scaling.** All rooms live in one process's memory. Two server instances wouldn't share state. To scale: add Redis for shared room state and use `@socket.io/redis-adapter`. You will not need this until you have more than a few hundred concurrent players.
 - **No DDoS protection beyond what Render/Cloudflare give you for free.** Don't post the URL to /r/all without thinking it through.
 

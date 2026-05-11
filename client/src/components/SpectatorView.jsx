@@ -1,20 +1,12 @@
-import { useEffect } from 'react';
-import { socket } from '../socket.js';
 import { PHASE } from '../../../shared/gameRules.js';
 
 // What spectators see during LOBBY and BATTLE phases.
 // Just status info — no editor, no kit reveal (kit is hidden during BATTLE
 // so a spectator can't broadcast the random sounds to non-spectators).
+//
+// NOTE: spectateEnded events are handled centrally in App.jsx — duplicating
+// the listener here caused races between two `setView` calls.
 export default function SpectatorView({ room, onLeave }) {
-  // Gracefully exit if the room was torn down.
-  useEffect(() => {
-    const onEnded = ({ code }) => {
-      if (code === room?.code) onLeave?.();
-    };
-    socket.on('spectateEnded', onEnded);
-    return () => socket.off('spectateEnded', onEnded);
-  }, [room?.code, onLeave]);
-
   const phaseLabel = room.phase === PHASE.LOBBY ? 'Waiting in lobby'
     : room.phase === PHASE.BATTLE ? 'Battle in progress'
     : room.phase;

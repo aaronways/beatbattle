@@ -81,25 +81,59 @@ export const PHASE = {
 //   - Pitched tracks can store any list of offsets [0..PITCHED_ROWS-1].
 //     Multiple values per step = chord.
 //
-// Keeping the inner shape an array (rather than a scalar) avoids a second
-// migration later if we want chords on melody tracks, and serialises cleanly
-// to JSON for the server to relay.
+// Track ids are no longer fixed names like "kick" — they're stable unique
+// strings (e.g. "kick-1", "kick-2", "melody-1"). This lets users add more
+// tracks of the same category dynamically (e.g. two kick lanes) without
+// breaking the engine's channel-lookup-by-id contract.
 export function makeEmptyBeat(bpm = BPM_DEFAULT, bars = DEFAULT_BARS) {
   const stepCount = STEPS_PER_BAR * bars;
   return {
     bpm,
     bars,
-    tracks: TRACK_SLOTS.map(slot => ({
-      id: slot.id,
-      name: slot.label,
+    tracks: TRACK_SLOTS.map((slot, idx) => makeTrack({
+      // Default tracks keep the legacy id where possible so existing rooms
+      // and submissions don't break. Open Hat is the one exception — uses
+      // its own id but maps to the "hat" category.
+      id: slot.id === 'hatO' ? 'hatO-1' : `${slot.category}-1`,
+      label: slot.label,
+      category: slot.category,
       type: slot.type,
-      soundId: null,
-      volume: 0.8,
-      pan: 0,
-      muted: false,
-      solo: false,
-      steps: Array.from({ length: stepCount }, () => []),
-    })),
+      preferOpenHat: slot.id === 'hatO',     // used by auto-fill heuristic
+    }, stepCount)),
     effects: { reverb: 0.15, delay: 0.0, filter: 18000, drive: 0 },
   };
+}
+
+// Build a fresh track record. Separate factory so the editor can construct
+// extra tracks at runtime in the same shape.
+export function makeTrack({ id, label, category, type, preferOpenHat = false }, stepCount) {
+  return {
+    id,
+    name: label,
+    category,
+    type,
+    soundId: null,
+    volume: 0.8,
+    pan: 0,
+    muted: false,
+    solo: false,
+    // Per-track effect sends. 0 = none, 1 = full. These are sends INTO the
+    // shared master FX returns — so two tracks can share the same reverb
+    // tail but in different amounts. This is what makes mixes sit together.
+    sends: { reverb: 0, delay: 0 },
+    // Per-track high-cut (low-pass) and drive let each track be shaped
+    // independently of master FX. filter 20000 = fully open (no cut).
+    filter: 20000,
+    drive: 0,
+    preferOpenHat,
+    steps: Array.from({ length: stepCount }, () => []),
+  };
+}
+
+// How many tracks of each category a player is allowed to add. We cap at the
+// kit composition for that category — no point allowing a 4th kick track
+// when the kit only ships 2 kick sounds. (Players can still leave duplicate
+// soundIds across tracks if they want.)
+export function maxTracksForCategory(category) {
+  return KIT_COMPOSITION[category] || 2;
 }

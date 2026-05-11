@@ -13,6 +13,7 @@ import { PHASE, KIT_COMPOSITION } from '../../shared/gameRules.js';
 
 export default function App() {
   const [user, setUser] = useState(null);
+  const [connectionError, setConnectionError] = useState(null);
   const [room, setRoom] = useState(null);
   const [view, setView] = useState('home'); // home | leaderboard | practice | spectate-browser
   const [practiceKit, setPracticeKit] = useState(null);
@@ -23,7 +24,9 @@ export default function App() {
 
   // Initial connect.
   useEffect(() => {
-    connect().then(setUser);
+    connect()
+      .then((u) => { setUser(u); setConnectionError(null); })
+      .catch((err) => setConnectionError(err.message || 'Connection failed'));
     const onRoom = (r) => {
       // Ignore straggler snapshots for a room we just left.
       if (leavingCodeRef.current && r?.code === leavingCodeRef.current) return;
@@ -75,6 +78,18 @@ export default function App() {
   };
 
   // ── Routing ──────────────────────────────────────────────────────────────
+  if (connectionError && !user) {
+    return (
+      <div className="connection-error">
+        <h1 className="logo">BEAT<span>BATTLE</span></h1>
+        <p className="error-msg">⚠ {connectionError}</p>
+        <button className="btn primary" onClick={() => window.location.reload()}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   if (view === 'leaderboard') {
     return <Leaderboard onBack={() => setView('home')} />;
   }
@@ -111,6 +126,9 @@ export default function App() {
       if (room.phase === PHASE.RESULT) {
         return <Winner room={room} onLeave={leaveRoom} />;
       }
+      // Defensive fallback: unknown phase — show the spectator placeholder
+      // rather than letting the function return undefined (which crashes React).
+      return <SpectatorView room={room} onLeave={leaveRoom} />;
     }
 
     // Player routing.
@@ -132,6 +150,8 @@ export default function App() {
     if (room.phase === PHASE.RESULT) {
       return <Winner room={room} onLeave={leaveRoom} />;
     }
+    // Defensive fallback for unknown phases.
+    return <Lobby room={room} onLeave={leaveRoom} />;
   }
 
   // Default home.

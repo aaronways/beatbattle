@@ -168,6 +168,16 @@ function snapshot(room, viewerId = null) {
             A: room.players[room.playerOrder[0]]?.beat || null,
             B: room.players[room.playerOrder[1]]?.beat || null,
           },
+          // During VOTING, tell each player viewer which letter is THEIR own
+          // beat. We don't reveal the other player's identity (that happens
+          // only at RESULT phase via `ownership`). Without this the client
+          // can't disable the self-vote button locally and has to rely on
+          // the server rejecting "you cannot vote for yourself", which
+          // looks like a broken UI.
+          youAre: (room.phase === PHASE.VOTING && viewerId)
+            ? (viewerId === room.playerOrder[0] ? 'A'
+              : viewerId === room.playerOrder[1] ? 'B' : null)
+            : null,
           ownership: reveal ? {
             A: room.players[room.playerOrder[0]]?.username,
             B: room.players[room.playerOrder[1]]?.username,
@@ -189,7 +199,7 @@ export function createPrivateRoom(io, user, { ranked = false } = {}, socketId = 
 }
 
 export function joinByCode(io, user, code, socketId = null) {
-  const room = rooms.get(code.toUpperCase());
+  const room = rooms.get(String(code || '').trim().toUpperCase());
   if (!room) return { error: 'Room not found' };
   if (Object.keys(room.players).length >= 2 && !room.players[user.id]) {
     return { error: 'Room is full' };
@@ -269,8 +279,24 @@ function joinRoom(io, room, user, socketId = null) {
 
 export function attachSocket(io, room, userId, socketId) {
   if (!room.players[userId]) return;
-  room.players[userId].socketId = socketId;
+  const player = room.players[userId];
+  // If they had a previous socket (e.g. another tab), pull that one out of
+  // the room channel so it stops receiving broadcasts. Without this, two
+  // tabs from the same user both listen to room events and one of them
+  // becomes a "ghost" pointer when the other tab closes.
+  if (player.socketId && player.socketId !== socketId) {
+    io.sockets.sockets.get(player.socketId)?.leave(room.code);
+  }
+  player.socketId = socketId;
+  player.disconnectedAt = null;   // they're back — cancel the grace forfeit
+  if (player.status === 'disconnected') {
+    player.status = player.beat ? 'submitted' : 'editing';
+  }
   io.sockets.sockets.get(socketId)?.join(room.code);
+  // Push the current state so the reconnecting client doesn't sit on a
+  // blank screen waiting for the next event. This was the root of the
+  // "refresh in lobby → no UI" bug.
+  io.sockets.sockets.get(socketId)?.emit('room', snapshot(room, userId));
 }
 
 export function setReady(io, room, userId, ready) {
@@ -346,19 +372,51 @@ function lockSubmissions(io, room) {
   room.phase = PHASE.PLAYBACK;
   room.battleEndsAt = null;
   broadcast(io, room);
-  // Client drives the actual playback; server moves to voting after a fixed
-  // window (longest reasonable beat = 8 bars * 4 beats / 140bpm ≈ 14s, x2 = 28s,
-  // pad to 35s).
-  setTimeout(() => openVoting(io, room), 35_000);
+
+  // Compute the actual playback window from the submitted beats. Each beat
+  // runs for (bars * 4 * 60 / bpm) seconds. Add a small gap between A and B
+  // (matches the client's 0.9s gap and intro animations) and a safety margin.
+  //
+  // Before this fix, a hardcoded 35s window truncated long beats — a 64-bar
+  // beat at 60 BPM is 256s per beat = nearly 9 minutes total, and the server
+  // would yank everyone into VOTING after 35s, ending playback prematurely.
+  const beatA = room.players[room.playerOrder[0]]?.beat;
+  const beatB = room.players[room.playerOrder[1]]?.beat;
+  const seconds = (beat) =>
+    beat?.bpm > 0 ? (beat.bars * 4 * 60) / beat.bpm : 0;
+  const playbackSec =
+    Math.max(2, seconds(beatA)) +   // beat A duration (or min 2s if empty)
+    1.2 +                            // intro + inter-beat gap
+    Math.max(2, seconds(beatB)) +
+    3;                               // generous safety tail
+  // Cap so a misbehaving client can't make us wait forever.
+  const waitMs = Math.min(playbackSec * 1000, 11 * 60 * 1000);
+
+  // Track the timeout id so we can cancel it from leaveRoomNow/disconnect.
+  room.lockTimeout = setTimeout(() => {
+    room.lockTimeout = null;
+    openVoting(io, room);
+  }, waitMs);
 }
 
 function openVoting(io, room) {
+  // The room might have been deleted (last player left during PLAYBACK).
+  // The lockSubmissions setTimeout closure still holds a reference to the
+  // old room object — without this check we'd start a setInterval that
+  // emits events to a channel with no listeners and never stops.
+  if (!rooms.has(room.code)) return;
   if (room.phase !== PHASE.PLAYBACK) return;
   room.phase = PHASE.VOTING;
   room.votingEndsAt = Date.now() + VOTING_SECONDS * 1000;
   broadcast(io, room);
   if (room.timer) clearInterval(room.timer);
   room.timer = setInterval(() => {
+    // Defensive: if the room disappears mid-voting, stop the timer.
+    if (!rooms.has(room.code)) {
+      clearInterval(room.timer);
+      room.timer = null;
+      return;
+    }
     if (Date.now() >= room.votingEndsAt) {
       clearInterval(room.timer);
       room.timer = null;
@@ -447,6 +505,9 @@ function finalizeVotes(io, room) {
 // Rematch resets the room back to lobby with the same players.
 export function rematch(io, room) {
   if (room.phase !== PHASE.RESULT) return;
+  // Clear any lingering timers/timeouts from the previous round.
+  if (room.timer) { clearInterval(room.timer); room.timer = null; }
+  if (room.lockTimeout) { clearTimeout(room.lockTimeout); room.lockTimeout = null; }
   room.phase = PHASE.LOBBY;
   room.seed = Math.floor(Math.random() * 0x7fffffff);
   room.kit = null;
@@ -460,6 +521,11 @@ export function rematch(io, room) {
     p.status = 'editing';
     p.beat = null;
     p.voted = null;
+  }
+  // Spectators from the prior round had their `voted` set — clear it so
+  // they can vote in the new round. Otherwise castVote rejects them.
+  for (const s of room.spectators.values()) {
+    s.voted = null;
   }
   broadcast(io, room);
 }
@@ -487,20 +553,36 @@ export function leaveRoomNow(io, userId) {
   const room = getRoomForUser(userId);
   if (!room) return;
 
+  // Cancel any pending playback-lock timeout (otherwise it'd later fire
+  // openVoting on a settled-by-forfeit room).
+  if (room.lockTimeout) { clearTimeout(room.lockTimeout); room.lockTimeout = null; }
+
   // In BATTLE, an explicit leave with an opponent present forfeits the match.
   if (room.phase === PHASE.BATTLE) {
     const other = Object.values(room.players).find(x => x.id !== userId);
     if (other) {
+      // The remaining player wins. Compute ELO if ranked.
+      const ratingWin  = store.getUser(other.id)?.rating ?? 1000;
+      const ratingLose = store.getUser(userId)?.rating ?? 1000;
+      const gamesWin   = store.getUser(other.id)?.games ?? 0;
+      const gamesLose  = store.getUser(userId)?.games ?? 0;
+      const eloChange = room.ranked
+        ? applyElo(ratingWin, ratingLose, 1, gamesWin, gamesLose)
+        : null;
+
       room.playerOrder = [other.id, userId];
-      room.voteCounts = { A: 1, B: 0 };
+      // We don't synthesize a fake vote tally — the result is a forfeit.
+      // The client renders this via the `forfeit` flag, not the counts.
+      room.voteCounts = { A: 0, B: 0 };
       room.players[userId].beat ||= { bpm: 140, bars: 4, tracks: [], effects: {} };
       room.players[other.id].beat ||= { bpm: 140, bars: 4, tracks: [], effects: {} };
       room.phase = PHASE.RESULT;
       room.result = {
         winner: 'A',
-        voteCounts: { A: 1, B: 0 },
+        voteCounts: { A: 0, B: 0 },
         winnerUsername: other.username,
         forfeit: true,
+        eloChange,
       };
       if (room.timer) { clearInterval(room.timer); room.timer = null; }
       store.recordMatch({
@@ -510,6 +592,8 @@ export function leaveRoomNow(io, userId) {
         playerB: userId,
         winner: 'A',
         forfeit: true,
+        newRatingA: eloChange?.newA,
+        newRatingB: eloChange?.newB,
       });
       // Now evict the leaver fully so they go back to home.
       leaveRoomFully(io, room, userId);
@@ -569,17 +653,30 @@ export function handleDisconnect(io, userId) {
       // Award the win to the other player if present.
       const other = Object.values(stillRoom.players).find(x => x.id !== userId);
       if (other && stillRoom.phase === PHASE.BATTLE) {
+        // Cancel any pending lock timeout.
+        if (stillRoom.lockTimeout) { clearTimeout(stillRoom.lockTimeout); stillRoom.lockTimeout = null; }
+
+        const ratingWin  = store.getUser(other.id)?.rating ?? 1000;
+        const ratingLose = store.getUser(userId)?.rating ?? 1000;
+        const gamesWin   = store.getUser(other.id)?.games ?? 0;
+        const gamesLose  = store.getUser(userId)?.games ?? 0;
+        const eloChange = stillRoom.ranked
+          ? applyElo(ratingWin, ratingLose, 1, gamesWin, gamesLose)
+          : null;
+
         stillRoom.playerOrder = [other.id, userId];
-        stillRoom.voteCounts = { A: 1, B: 0 };
+        stillRoom.voteCounts = { A: 0, B: 0 };
         stillRoom.players[userId].beat ||= { bpm: 140, bars: 4, tracks: [], effects: {} };
         stillRoom.players[other.id].beat ||= { bpm: 140, bars: 4, tracks: [], effects: {} };
         stillRoom.phase = PHASE.RESULT;
         stillRoom.result = {
           winner: 'A',
-          voteCounts: { A: 1, B: 0 },
+          voteCounts: { A: 0, B: 0 },
           winnerUsername: other.username,
           forfeit: true,
+          eloChange,
         };
+        if (stillRoom.timer) { clearInterval(stillRoom.timer); stillRoom.timer = null; }
         store.recordMatch({
           code: stillRoom.code,
           ranked: stillRoom.ranked,
@@ -587,6 +684,8 @@ export function handleDisconnect(io, userId) {
           playerB: userId,
           winner: 'A',
           forfeit: true,
+          newRatingA: eloChange?.newA,
+          newRatingB: eloChange?.newB,
         });
         broadcast(io, stillRoom);
       } else {
@@ -661,7 +760,7 @@ export function listPublicMatches() {
 //   - User can't spectate a finished match.
 //   - Idempotent if they're already a spectator here (just refresh socket).
 export function spectateRoom(io, user, code, socketId) {
-  const room = rooms.get(code.toUpperCase());
+  const room = rooms.get(String(code || '').trim().toUpperCase());
   if (!room) return { error: 'Match not found' };
   if (room.isPrivate) return { error: 'This match is private' };
   if (room.phase === PHASE.RESULT) return { error: 'Match is over' };

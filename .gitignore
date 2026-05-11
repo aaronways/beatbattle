@@ -1,0 +1,26 @@
+# dependencies
+node_modules/
+*/node_modules/
+
+# build outputs
+client/dist/
+dist/
+
+# env files (real values, never commit)
+.env
+.env.local
+*/.env
+*/.env.local
+
+# persistent store data (JSON store file lives here locally; in prod it
+# lives in $DATA_DIR, typically /var/data on Render disk-mounted instances)
+server/.data/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
+*.swp

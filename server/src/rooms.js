@@ -8,6 +8,7 @@
 
 import { generateKit } from './sounds.js';
 import { applyElo } from './elo.js';
+import { scoreBeat } from './scorer.js';
 import * as store from './store.js';
 import {
   ROOM_CODE_LENGTH,
@@ -458,13 +459,43 @@ export function castVote(io, room, userId, choice) {
 
 function finalizeVotes(io, room) {
   const { A, B } = room.voteCounts;
-  let winner;
-  if (A > B) winner = 'A';
-  else if (B > A) winner = 'B';
-  else winner = 'DRAW';
-
   const userA = room.playerOrder[0];
   const userB = room.playerOrder[1];
+  const beatA = room.players[userA]?.beat;
+  const beatB = room.players[userB]?.beat;
+
+  // Compute algorithmic scores for BOTH beats up front. We always include
+  // them in the result payload (so the client can show "judged on
+  // musicality" when applicable), but they only DETERMINE the winner when
+  // human votes are tied.
+  const scoreA_alg = scoreBeat(beatA);
+  const scoreB_alg = scoreBeat(beatB);
+
+  // Tie-breaking rules:
+  //   1. If human votes are decisive → human votes pick the winner.
+  //   2. If votes are tied (which is GUARANTEED in 1v1 without spectators
+  //      because players can't vote for themselves), the algorithmic
+  //      scorer breaks the tie. The whole point: avoid the mathematical
+  //      always-DRAW outcome that 1v1 voting locks us into.
+  //   3. If even the algorithm scores are exactly equal, declare a real
+  //      draw. Extremely rare in practice — score has ~150 distinct
+  //      values across reasonable beats.
+  let winner;
+  let decidedBy;
+  if (A > B) {
+    winner = 'A';
+    decidedBy = 'votes';
+  } else if (B > A) {
+    winner = 'B';
+    decidedBy = 'votes';
+  } else if (scoreA_alg.score !== scoreB_alg.score) {
+    winner = scoreA_alg.score > scoreB_alg.score ? 'A' : 'B';
+    decidedBy = 'algorithm';
+  } else {
+    winner = 'DRAW';
+    decidedBy = 'tied';
+  }
+
   const ratingA = store.getUser(userA)?.rating ?? 1000;
   const ratingB = store.getUser(userB)?.rating ?? 1000;
   const gamesA = store.getUser(userA)?.games ?? 0;
@@ -485,6 +516,7 @@ function finalizeVotes(io, room) {
     playerB: userB,
     winner,
     voteCounts: { ...room.voteCounts },
+    decidedBy,
     newRatingA: eloChange?.newA,
     newRatingB: eloChange?.newB,
   });
@@ -493,7 +525,14 @@ function finalizeVotes(io, room) {
   room.votingEndsAt = null;
   room.result = {
     winner, // 'A' | 'B' | 'DRAW'
+    decidedBy,                 // 'votes' | 'algorithm' | 'tied'
     voteCounts: { ...room.voteCounts },
+    // Expose the score breakdowns so the result screen can show which
+    // dimensions each beat scored well on (rhythm, harmony, etc).
+    algorithmScores: {
+      A: scoreA_alg,
+      B: scoreB_alg,
+    },
     winnerUsername: winner === 'A' ? room.players[userA]?.username
                   : winner === 'B' ? room.players[userB]?.username
                   : null,

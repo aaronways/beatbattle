@@ -9,11 +9,42 @@ const KIT_GROUPS = [
 
 export default function SoundKit({
   kit, beat, locked, armedSoundId, onArm, onPreview,
+  collapsed, onToggleCollapse,
 }) {
+  // Collapsed rail mode — shrunken vertical strip with just a chevron button.
+  // We keep this BEFORE the loading check so it works even before the kit
+  // arrives, and so the collapsed/expanded grid layout stays consistent.
+  if (collapsed) {
+    return (
+      <aside className="kit-panel collapsed" aria-label="Sound kit (collapsed)">
+        <button
+          className="panel-collapse-toggle"
+          onClick={onToggleCollapse}
+          title="Expand sound kit"
+          aria-label="Expand sound kit"
+        >▶</button>
+        <div className="collapsed-label">KIT</div>
+        {kit && (
+          <div className="collapsed-meta">
+            {Object.values(kit.sounds).reduce((n, arr) => n + arr.length, 0)}
+          </div>
+        )}
+      </aside>
+    );
+  }
+
   if (!kit) {
     return (
       <aside className="kit-panel">
-        <div className="panel-header">SOUND KIT</div>
+        <div className="panel-header">
+          <span>SOUND KIT</span>
+          <button
+            className="panel-collapse-btn"
+            onClick={onToggleCollapse}
+            title="Collapse panel"
+            aria-label="Collapse sound kit"
+          >◀</button>
+        </div>
         <div className="kit-empty">Loading kit…</div>
       </aside>
     );
@@ -31,11 +62,19 @@ export default function SoundKit({
     <aside className="kit-panel">
       <div className="panel-header">
         <span>SOUND KIT</span>
-        {armedSoundId && (
-          <button className="kit-cancel" onClick={() => onArm(null)} title="Cancel (Esc)">
-            ✕ CANCEL
-          </button>
-        )}
+        <div className="panel-header-actions">
+          {armedSoundId && (
+            <button className="kit-cancel" onClick={() => onArm(null)} title="Cancel (Esc)">
+              ✕ CANCEL
+            </button>
+          )}
+          <button
+            className="panel-collapse-btn"
+            onClick={onToggleCollapse}
+            title="Collapse panel"
+            aria-label="Collapse sound kit"
+          >◀</button>
+        </div>
       </div>
 
       <div className="kit-scroll">

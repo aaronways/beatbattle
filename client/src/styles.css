@@ -363,6 +363,19 @@ input:focus, select:focus { border-color: var(--accent); }
   grid-template-columns: 280px 1fr 320px;
   gap: 12px;
   min-height: 0;     /* let children scroll instead of pushing parent */
+  transition: grid-template-columns 0.18s ease-out;
+}
+/* Collapsed-panel layout variants. Each collapsed side shrinks to a 44px
+   rail and the sequencer takes the freed space. transition on the grid
+   gives a smooth resize. */
+.arena-main.kit-collapsed:not(.mixer-collapsed) {
+  grid-template-columns: 44px 1fr 320px;
+}
+.arena-main.mixer-collapsed:not(.kit-collapsed) {
+  grid-template-columns: 280px 1fr 44px;
+}
+.arena-main.kit-collapsed.mixer-collapsed {
+  grid-template-columns: 44px 1fr 44px;
 }
 
 /* Common pane shell */
@@ -1396,4 +1409,169 @@ input:focus, select:focus { border-color: var(--accent); }
 .banner.neutral {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: white;
+}
+
+/* ── Algorithmic judge breakdown on Winner screen ──────────────────── */
+.decision-note {
+  color: var(--accent-2);
+  text-align: center;
+  font-size: 13px;
+  letter-spacing: 0.4px;
+  margin: 8px 0 16px;
+  padding: 8px 16px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: var(--r-md);
+  display: inline-block;
+}
+.alg-scores {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.alg-scores h4 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  letter-spacing: 1px;
+  color: var(--fg-2);
+  margin: 0 0 14px;
+}
+.alg-tag {
+  background: var(--accent-2);
+  color: var(--bg-0);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  padding: 3px 8px;
+  border-radius: 3px;
+}
+.alg-row {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+.alg-row.alg-winner {
+  border-color: var(--accent-2);
+  background: rgba(53, 187, 222, 0.05);
+}
+.alg-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.alg-total {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 18px;
+  color: var(--accent-2);
+  font-weight: 800;
+}
+.alg-row.alg-winner .alg-total { color: var(--accent-warm); }
+.alg-bars {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.alg-chip {
+  background: var(--bg-2);
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 10px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.alg-chip-name {
+  color: var(--fg-2);
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+.alg-chip-val {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  color: var(--fg-0);
+}
+.alg-chip.alg-penalty {
+  background: rgba(220, 90, 90, 0.15);
+  border: 1px solid rgba(220, 90, 90, 0.3);
+}
+.alg-chip.alg-penalty .alg-chip-val { color: var(--accent-warm); }
+
+/* ── Collapsible panels ──────────────────────────────────────────────── */
+.panel-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.panel-collapse-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: 10px;
+  padding: 3px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.1s;
+}
+.panel-collapse-btn:hover {
+  background: var(--bg-2);
+  color: var(--fg-0);
+  border-color: var(--accent);
+}
+/* The collapsed rail itself */
+.kit-panel.collapsed, .mixer-panel.collapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 12px 0;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  gap: 14px;
+  overflow: hidden;
+}
+.panel-collapse-toggle {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--fg-1);
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.1s;
+}
+.panel-collapse-toggle:hover {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+.collapsed-label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  transform: rotate(180deg);
+  font-size: 10px;
+  letter-spacing: 3px;
+  font-weight: 800;
+  color: var(--fg-2);
+  margin-top: 6px;
+}
+.collapsed-meta {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--accent-2);
+  background: var(--bg-2);
+  padding: 2px 6px;
+  border-radius: 3px;
+  margin-top: auto;
+  margin-bottom: 6px;
 }

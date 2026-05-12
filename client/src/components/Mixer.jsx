@@ -28,6 +28,26 @@ export default function Mixer({ beat, locked, onUpdateTrack, onUpdateEffects, on
     });
   }, [beat?.tracks]);
 
+  // Collapsed mode: narrow strip on the right with just the expand chevron.
+  // Rendered BEFORE the !beat guard so the grid layout stays consistent
+  // even before tracks are populated.
+  if (collapsed) {
+    return (
+      <aside className="mixer-panel collapsed" aria-label="Mixer (collapsed)">
+        <button
+          className="panel-collapse-toggle"
+          onClick={onToggleCollapse}
+          title="Expand mixer"
+          aria-label="Expand mixer"
+        >◀</button>
+        <div className="collapsed-label">MIX</div>
+        {beat && (
+          <div className="collapsed-meta">{beat.tracks.length}</div>
+        )}
+      </aside>
+    );
+  }
+
   if (!beat) return null;
 
   // Drag handlers attached to every continuous input. Pointer events fire
@@ -49,7 +69,15 @@ export default function Mixer({ beat, locked, onUpdateTrack, onUpdateEffects, on
 
   return (
     <aside className="mixer-panel">
-      <div className="panel-header">MIXER</div>
+      <div className="panel-header">
+        <span>MIXER</span>
+        <button
+          className="panel-collapse-btn"
+          onClick={onToggleCollapse}
+          title="Collapse panel"
+          aria-label="Collapse mixer"
+        >▶</button>
+      </div>
 
       <div className="mixer-tracks">
         {beat.tracks.map(t => {

@@ -46,6 +46,31 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
   //   - { steps: [...] } for full-pattern copy of a single track
   //   - null if nothing copied
   const [trackClipboard, setTrackClipboard] = useState(null);
+  // Collapsible side panels. Both default to expanded. Persisted to
+  // localStorage so the layout survives page reloads — collapsing the kit
+  // is a "set it once" choice users tend to want sticky.
+  const [kitCollapsed, setKitCollapsed] = useState(() => {
+    try { return localStorage.getItem('beatbattle.kitCollapsed') === '1'; }
+    catch { return false; }
+  });
+  const [mixerCollapsed, setMixerCollapsed] = useState(() => {
+    try { return localStorage.getItem('beatbattle.mixerCollapsed') === '1'; }
+    catch { return false; }
+  });
+  const toggleKit = () => {
+    setKitCollapsed(v => {
+      const next = !v;
+      try { localStorage.setItem('beatbattle.kitCollapsed', next ? '1' : '0'); } catch {}
+      return next;
+    });
+  };
+  const toggleMixer = () => {
+    setMixerCollapsed(v => {
+      const next = !v;
+      try { localStorage.setItem('beatbattle.mixerCollapsed', next ? '1' : '0'); } catch {}
+      return next;
+    });
+  };
   const submittedRef = useRef(false);
   const beatRef = useRef(beat);
   beatRef.current = beat;
@@ -573,7 +598,11 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
       </header>
 
       {/* ── MAIN: KIT | SEQUENCER | MIXER ───────────────────────── */}
-      <div className="arena-main">
+      <div className={
+        'arena-main' +
+        (kitCollapsed ? ' kit-collapsed' : '') +
+        (mixerCollapsed ? ' mixer-collapsed' : '')
+      }>
         <SoundKit
           kit={kit}
           beat={beat}
@@ -581,6 +610,8 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
           armedSoundId={armedSoundId}
           onArm={armSound}
           onPreview={previewSound}
+          collapsed={kitCollapsed}
+          onToggleCollapse={toggleKit}
         />
 
         <div className="seq-pane">
@@ -625,6 +656,8 @@ export default function BeatEditor({ room, kit, isPractice, onLeave, onSubmitted
           onUpdateEffects={updateEffects}
           onBeginDrag={beginDrag}
           onEndDrag={endDrag}
+          collapsed={mixerCollapsed}
+          onToggleCollapse={toggleMixer}
         />
       </div>
 

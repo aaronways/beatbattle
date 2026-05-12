@@ -9,7 +9,7 @@ import { useState, useEffect } from 'react';
 // reverb knob still controls overall ambience, while per-track sends decide
 // how WET each individual lane sits in that ambience. This is how real mixes
 // stay glued together: shared FX returns, varying send amounts.
-export default function Mixer({ beat, locked, onUpdateTrack, onUpdateEffects, onBeginDrag, onEndDrag }) {
+export default function Mixer({ beat, locked, onUpdateTrack, onUpdateEffects, onBeginDrag, onEndDrag, collapsed = false, onToggleCollapse = () => {} }) {
   const [expanded, setExpanded] = useState(() => new Set());
 
   // Prune expanded set when tracks disappear so stale ids don't accumulate

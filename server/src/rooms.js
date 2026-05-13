@@ -202,7 +202,7 @@ export function createPrivateRoom(io, user, { ranked = false } = {}, socketId = 
 export function joinByCode(io, user, code, socketId = null) {
   const room = rooms.get(String(code || '').trim().toUpperCase());
   if (!room) return { error: 'Room not found' };
-  if (Object.keys(room.players).length >= 2 && !room.players[user.id]) {
+  if (Object.keys(room.players).length >= 4 && !room.players[user.id]) {
     return { error: 'Room is full' };
   }
   joinRoom(io, room, user, socketId);
@@ -304,9 +304,10 @@ export function setReady(io, room, userId, ready) {
   const p = room.players[userId];
   if (!p) return;
   p.ready = ready;
-  // If both players are ready and we have exactly two, start the battle.
+  // Start once at least 2 players are ready in a lobby up to 4 players.
   const all = Object.values(room.players);
-  if (room.phase === PHASE.LOBBY && all.length === 2 && all.every(x => x.ready)) {
+  const readyCount = all.filter(x => x.ready).length;
+  if (room.phase === PHASE.LOBBY && all.length >= 2 && readyCount >= 2) {
     startBattle(io, room);
   } else {
     broadcast(io, room);

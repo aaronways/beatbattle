@@ -4,7 +4,7 @@ import { socket } from '../socket.js';
 export default function Lobby({ room, onLeave }) {
   const [copied, setCopied] = useState(false);
   const you = room.players.find(p => p.isYou);
-  const opp = room.players.find(p => !p.isYou);
+  const others = room.players.filter(p => !p.isYou);
 
   const copy = async () => {
     try {
@@ -28,8 +28,12 @@ export default function Lobby({ room, onLeave }) {
 
       <div className="lobby-slots">
         <PlayerSlot player={you} you />
-        <span className="vs">VS</span>
-        <PlayerSlot player={opp} />
+        {others.map((player, idx) => (
+          <>
+            <span className="vs">VS</span>
+            <PlayerSlot key={player.id || idx} player={player} />
+          </>
+        ))}
       </div>
 
       <div className="lobby-actions">
@@ -39,9 +43,8 @@ export default function Lobby({ room, onLeave }) {
         >
           {you?.ready ? '✓ Ready — click to cancel' : 'Ready up'}
         </button>
-        {!opp && <p className="muted">Share the code <b>{room.code}</b> to invite a friend.</p>}
-        {opp && !opp.ready && <p className="muted">Waiting for {opp.username}…</p>}
-        {opp && opp.ready && you?.ready && <p className="muted">Starting battle…</p>}
+        {others.length === 0 && <p className="muted">Share the code <b>{room.code}</b> to invite friends.</p>}
+        {others.length > 0 && <p className="muted">Battle starts once 2 players are ready.</p>}
       </div>
     </div>
   );

@@ -105,8 +105,8 @@ function newRoom({ ranked = false, isPrivate = true } = {}) {
     battleEndsAt: null,
     votingEndsAt: null,
     timer: null,
-    voteCounts: { A: 0, B: 0 },
-    playerOrder: [],     // [userIdA, userIdB] — A is first to play during playback
+    voteCounts: {},
+    playerOrder: [],
     result: null,
   };
   rooms.set(code, room);
@@ -218,23 +218,47 @@ export function joinByCode(io, user, code, socketId = null) {
 //       socket to the room as well. Without (b), the first-queued player
 //       never receives the room broadcast and looks stuck.
 export function quickBattle(io, user, socketId) {
-  // Drop any stale entry for this user (re-clicked Quick Battle, reconnected).
+  // Remove stale queue entries for this user.
   quickBattleQueue = quickBattleQueue.filter(e => e.userId !== user.id);
-  // Match with the oldest waiting player if any.
+
+  // FIRST: attempt to join an existing ranked public room with space.
+  for (const room of rooms.values()) {
+    if (
+      room.ranked &&
+      !room.isPrivate &&
+      room.phase === PHASE.LOBBY &&
+      Object.keys(room.players).length < 4 &&
+      !room.players[user.id]
+    ) {
+      joinRoom(io, room, user, socketId);
+      return { room };
+    }
+  }
+
+  // SECOND: if another player is waiting, create a new ranked room.
   if (quickBattleQueue.length > 0) {
     const opponent = quickBattleQueue.shift();
     const opponentUser = store.getUser(opponent.userId);
-    if (!opponentUser) return quickBattle(io, user, socketId); // their account vanished, retry
+
+    if (!opponentUser) {
+      return quickBattle(io, user, socketId);
+    }
+
     const room = newRoom({ ranked: true, isPrivate: false });
-    // Join the queued opponent first (passing their stored socketId), then
-    // the joining user. Each joinRoom() calls broadcast() at the end, so by
-    // the time the second joinRoom completes, both sockets are in the room
-    // channel and both clients receive the full snapshot.
+
     joinRoom(io, room, opponentUser, opponent.socketId);
     joinRoom(io, room, user, socketId);
+
     return { room };
   }
-  quickBattleQueue.push({ userId: user.id, socketId, joinedAt: Date.now() });
+
+  // OTHERWISE: queue this player.
+  quickBattleQueue.push({
+    userId: user.id,
+    socketId,
+    joinedAt: Date.now(),
+  });
+
   return { queued: true };
 }
 
@@ -304,9 +328,9 @@ export function setReady(io, room, userId, ready) {
   const p = room.players[userId];
   if (!p) return;
   p.ready = ready;
-  // Start once at least 2 players are ready in lobby.
+  // If both players are ready and we have exactly two, start the battle.
   const all = Object.values(room.players);
-  if (room.phase === PHASE.LOBBY && all.filter(x => x.ready).length >= 2) {
+  if (room.phase === PHASE.LOBBY && all.length === 2 && all.every(x => x.ready)) {
     startBattle(io, room);
   } else {
     broadcast(io, room);
@@ -618,7 +642,7 @@ export function leaveRoomNow(io, userId) {
       room.phase = PHASE.RESULT;
       room.result = {
         winner: 'A',
-        voteCounts: { A: 0, B: 0 },
+        voteCounts: {},
         winnerUsername: other.username,
         forfeit: true,
         eloChange,
@@ -710,7 +734,7 @@ export function handleDisconnect(io, userId) {
         stillRoom.phase = PHASE.RESULT;
         stillRoom.result = {
           winner: 'A',
-          voteCounts: { A: 0, B: 0 },
+          voteCounts: {},
           winnerUsername: other.username,
           forfeit: true,
           eloChange,

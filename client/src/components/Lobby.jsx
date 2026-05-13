@@ -4,7 +4,7 @@ import { socket } from '../socket.js';
 export default function Lobby({ room, onLeave }) {
   const [copied, setCopied] = useState(false);
   const you = room.players.find(p => p.isYou);
-  const others = room.players.filter(p => !p.isYou);
+  const opp = room.players.find(p => !p.isYou);
 
   const copy = async () => {
     try {
@@ -28,15 +28,8 @@ export default function Lobby({ room, onLeave }) {
 
       <div className="lobby-slots">
         <PlayerSlot player={you} you />
-        {others.map((player, i) => (
-          <>
-            <span className="vs">VS</span>
-            <PlayerSlot key={player.id || i} player={player} />
-          </>
-        ))}
-        {Array.from({ length: Math.max(0, 3 - others.length) }).map((_, i) => (
-          <PlayerSlot key={`empty-${i}`} player={null} />
-        ))}
+        <span className="vs">VS</span>
+        <PlayerSlot player={opp} />
       </div>
 
       <div className="lobby-actions">
@@ -46,9 +39,9 @@ export default function Lobby({ room, onLeave }) {
         >
           {you?.ready ? '✓ Ready — click to cancel' : 'Ready up'}
         </button>
-        {others.length === 0 && <p className="muted">Share the code <b>{room.code}</b> to invite friends.</p>}
-        {others.length > 0 && others.filter(p => p.ready).length < 1 && <p className="muted">Waiting for players to ready up…</p>}
-        {you?.ready && room.players.filter(p => p.ready).length >= 2 && <p className="muted">Starting battle…</p>}
+        {!opp && <p className="muted">Share the code <b>{room.code}</b> to invite a friend.</p>}
+        {opp && !opp.ready && <p className="muted">Waiting for {opp.username}…</p>}
+        {opp && opp.ready && you?.ready && <p className="muted">Starting battle…</p>}
       </div>
     </div>
   );

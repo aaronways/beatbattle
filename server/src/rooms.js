@@ -304,10 +304,9 @@ export function setReady(io, room, userId, ready) {
   const p = room.players[userId];
   if (!p) return;
   p.ready = ready;
-  // Start once at least 2 players are ready in a lobby up to 4 players.
+  // Start once at least 2 players are ready in lobby.
   const all = Object.values(room.players);
-  const readyCount = all.filter(x => x.ready).length;
-  if (room.phase === PHASE.LOBBY && all.length >= 2 && readyCount >= 2) {
+  if (room.phase === PHASE.LOBBY && all.filter(x => x.ready).length >= 2) {
     startBattle(io, room);
   } else {
     broadcast(io, room);

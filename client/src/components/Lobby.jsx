@@ -28,11 +28,14 @@ export default function Lobby({ room, onLeave }) {
 
       <div className="lobby-slots">
         <PlayerSlot player={you} you />
-        {others.map((player, idx) => (
+        {others.map((player, i) => (
           <>
             <span className="vs">VS</span>
-            <PlayerSlot key={player.id || idx} player={player} />
+            <PlayerSlot key={player.id || i} player={player} />
           </>
+        ))}
+        {Array.from({ length: Math.max(0, 3 - others.length) }).map((_, i) => (
+          <PlayerSlot key={`empty-${i}`} player={null} />
         ))}
       </div>
 
@@ -44,7 +47,8 @@ export default function Lobby({ room, onLeave }) {
           {you?.ready ? '✓ Ready — click to cancel' : 'Ready up'}
         </button>
         {others.length === 0 && <p className="muted">Share the code <b>{room.code}</b> to invite friends.</p>}
-        {others.length > 0 && <p className="muted">Battle starts once 2 players are ready.</p>}
+        {others.length > 0 && others.filter(p => p.ready).length < 1 && <p className="muted">Waiting for players to ready up…</p>}
+        {you?.ready && room.players.filter(p => p.ready).length >= 2 && <p className="muted">Starting battle…</p>}
       </div>
     </div>
   );
